@@ -1,6 +1,5 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/SupplierIntelligence.Api/SupplierIntelligence.Api.csproj" />
-    <Project Path="src/TaskApi.Api/TaskApi.Api.csproj" />
   </Folder>
 </Solution>

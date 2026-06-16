@@ -215,7 +215,6 @@ public static class SupplierEvidenceSnapshotBuilder
     {
         var normalized = snippet.Trim();
         return normalized.Length < 40 ||
-            normalized.Equals("SKF", StringComparison.OrdinalIgnoreCase) ||
             normalized.Equals("No description found.", StringComparison.OrdinalIgnoreCase) ||
             normalized.Contains("enable JavaScript", StringComparison.OrdinalIgnoreCase) ||
             normalized.Contains("verify you are human", StringComparison.OrdinalIgnoreCase) ||

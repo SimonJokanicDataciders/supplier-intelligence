@@ -21,3 +21,8 @@ test-results/
 .env
 .env.*
 !.env.example
+*.md
+!README.md
+*.excalidraw
+!csharp-learning-tldr.excalidraw
+src/TaskApi.Api/

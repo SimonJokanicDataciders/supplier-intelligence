@@ -409,7 +409,6 @@ public sealed partial class ResearchFactExtractor : IResearchFactExtractor
     {
         var normalized = snippet.Trim();
         return normalized.Length >= 40 &&
-            !normalized.Equals("SKF", StringComparison.OrdinalIgnoreCase) &&
             !normalized.Equals("No description found.", StringComparison.OrdinalIgnoreCase) &&
             !normalized.StartsWith('{') &&
             !normalized.Contains("enable JavaScript", StringComparison.OrdinalIgnoreCase) &&
