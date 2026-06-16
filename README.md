@@ -89,5 +89,5 @@ This is a learning/demo application, not a production supplier-risk system.
 
 ## Dashboard
 
-![Supplier Dashboard](image.png)
-![Analysis result](image-1.png)
+![Dashboard](docs/images/dashboard.png)
+![Supplier analysis](docs/images/analysis-result.png)
