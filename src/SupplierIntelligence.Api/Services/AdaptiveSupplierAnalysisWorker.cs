@@ -108,14 +108,14 @@ public sealed class AdaptiveSupplierAnalysisWorker(
                 cancellationToken);
 
             job.Status = AnalysisJobStatus.Completed;
-            job.ProgressMessage = "Analysis completed.";
+            job.ProgressMessage = "Analysis completed. Supplier evidence, facts, risk memo, and analytics are ready to review.";
             job.CompletedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             job.Status = AnalysisJobStatus.Failed;
-            job.ProgressMessage = "Analysis failed.";
+            job.ProgressMessage = "Analysis failed. Existing evidence is still available.";
             job.ErrorMessage = exception.Message;
             job.CompletedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(CancellationToken.None);
@@ -194,7 +194,7 @@ public sealed class AdaptiveSupplierAnalysisWorker(
 
         await researchFactExtractor.RefreshFactsAsync(supplier, db, cancellationToken);
 
-        job.ProgressMessage = "Generating local-model risk assessment.";
+        job.ProgressMessage = "Building risk memo from stored evidence.";
         await db.SaveChangesAsync(cancellationToken);
 
         var estimatedRiskLevel = EvidenceQualityCalculator.EstimateRiskLevel(supplier);
@@ -227,6 +227,7 @@ public sealed class AdaptiveSupplierAnalysisWorker(
             EvidenceSnapshotJson = evidenceSnapshotJson,
             GenerationDurationMs = (int)Math.Min(generationTimer.ElapsedMilliseconds, int.MaxValue)
         });
+        job.ProgressMessage = "Refreshing supplier analytics.";
         await db.SaveChangesAsync(cancellationToken);
     }
 
@@ -255,6 +256,9 @@ public sealed class AdaptiveSupplierAnalysisWorker(
 
         foreach (var target in targets)
         {
+            job.ProgressMessage = $"Checking evidence source: {target.SourceName}.";
+            await db.SaveChangesAsync(cancellationToken);
+
             var checkResult = await sourceEvidenceChecker.CheckAsync(target.Url, cancellationToken);
             supplier.SourceChecks.Add(new SourceCheck
             {
@@ -305,6 +309,9 @@ public sealed class AdaptiveSupplierAnalysisWorker(
         {
             try
             {
+                job.ProgressMessage = $"Searching public evidence: {query.Label}.";
+                await db.SaveChangesAsync(cancellationToken);
+
                 var research = await localModel.ChatAsync(
                     localModel.DefaultModel,
                     BuildCompanyWebSearchSystemPrompt(),

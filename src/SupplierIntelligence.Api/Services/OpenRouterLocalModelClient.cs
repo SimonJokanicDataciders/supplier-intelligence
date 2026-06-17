@@ -167,7 +167,7 @@ public sealed class OpenRouterLocalModelClient(
 
         httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
         httpClient.DefaultRequestHeaders.TryAddWithoutValidation("HTTP-Referer", "http://localhost");
-        httpClient.DefaultRequestHeaders.TryAddWithoutValidation("X-Title", "Supplier Intelligence Learning App");
+        httpClient.DefaultRequestHeaders.TryAddWithoutValidation("X-OpenRouter-Title", "Supplier Intelligence Learning App");
     }
 
     private static bool IsOllamaDefault(string model)

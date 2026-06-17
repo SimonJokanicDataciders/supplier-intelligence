@@ -38,8 +38,8 @@ public static class LocalModelEndpoints
             }
         })
         .Produces<LocalModelStatusResponse>()
-        .WithSummary("Get local model runtime status")
-        .WithDescription("Returns Ollama/local-model provider information, the configured default model, whether the runtime is reachable, and the models currently available to the runtime.")
+        .WithSummary("Get model runtime status")
+        .WithDescription("Returns the configured model provider, base URL, default model, whether the runtime is reachable, and the models currently available to the runtime.")
         .WithName("GetLocalModels");
 
         return app;

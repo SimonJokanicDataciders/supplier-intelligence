@@ -92,6 +92,55 @@ public static class SupplierEndpoints
         .WithDescription("Returns one supplier with certifications, source checks, and saved risk assessments.")
         .WithName("GetSupplierById");
 
+        suppliers.MapGet("/{id:int}/review-summary", async (
+            int id,
+            AppDbContext db,
+            CancellationToken cancellationToken) =>
+        {
+            var supplier = await db.Suppliers
+                .AsNoTracking()
+                .Include(s => s.Certifications)
+                .Include(s => s.SourceChecks)
+                .Include(s => s.RiskAssessments)
+                .Include(s => s.MatchCandidates)
+                .AsSplitQuery()
+                .FirstOrDefaultAsync(s => s.Id == id, cancellationToken);
+
+            return supplier is null
+                ? Results.NotFound()
+                : Results.Ok(BuildReviewSummary(supplier));
+        })
+        .Produces<SupplierReviewSummaryResponse>()
+        .Produces(StatusCodes.Status404NotFound)
+        .WithSummary("Get supplier review summary")
+        .WithDescription("Returns a generic review summary for the selected supplier: next action, known information, missing information, and trust signals.")
+        .WithName("GetSupplierReviewSummary");
+
+        suppliers.MapGet("/{id:int}/analytics", async (
+            int id,
+            AppDbContext db,
+            CancellationToken cancellationToken) =>
+        {
+            var supplier = await db.Suppliers
+                .AsNoTracking()
+                .Include(s => s.Certifications)
+                .Include(s => s.SourceChecks)
+                .Include(s => s.RiskAssessments)
+                .Include(s => s.AnalysisJobs)
+                .Include(s => s.MatchCandidates)
+                .AsSplitQuery()
+                .FirstOrDefaultAsync(s => s.Id == id, cancellationToken);
+
+            return supplier is null
+                ? Results.NotFound()
+                : Results.Ok(BuildAnalytics(supplier));
+        })
+        .Produces<SupplierAnalyticsResponse>()
+        .Produces(StatusCodes.Status404NotFound)
+        .WithSummary("Get supplier analytics")
+        .WithDescription("Returns trust breakdown bars, source mix, review timeline, strongest signals, and weakest gaps for one supplier.")
+        .WithName("GetSupplierAnalytics");
+
         suppliers.MapPost("/", async (
             CreateSupplierRequest request,
             AppDbContext db,
@@ -274,7 +323,7 @@ public static class SupplierEndpoints
             catch (LocalModelException exception)
             {
                 return Results.Problem(
-                    title: "Local model generation failed",
+                    title: "Model generation failed",
                     detail: exception.Message,
                     statusCode: StatusCodes.Status503ServiceUnavailable);
             }
@@ -283,8 +332,8 @@ public static class SupplierEndpoints
         .Produces<GenerateRiskAssessmentResponse>(StatusCodes.Status201Created)
         .Produces(StatusCodes.Status404NotFound)
         .Produces(StatusCodes.Status503ServiceUnavailable)
-        .WithSummary("Generate supplier risk assessment with local model")
-        .WithDescription("Builds an evidence prompt from stored supplier data, sends it to the configured Ollama/local-model client, saves the generated assessment, and returns the saved result.")
+        .WithSummary("Generate supplier risk assessment with configured model provider")
+        .WithDescription("Builds an evidence prompt from stored supplier data, sends it to the configured model provider, saves the generated assessment, and returns the saved result.")
         .WithName("GenerateSupplierRiskAssessment");
 
         suppliers.MapGet("/{id:int}/risk-assessments", async (
@@ -1178,6 +1227,626 @@ public static class SupplierEndpoints
         }
 
         return certifications;
+    }
+
+    private static SupplierReviewSummaryResponse BuildReviewSummary(Supplier supplier)
+    {
+        var latestAssessment = supplier.RiskAssessments
+            .OrderByDescending(assessment => assessment.CreatedAt)
+            .FirstOrDefault();
+        var confirmedIdentity = supplier.MatchCandidates
+            .Where(candidate => candidate.Status == SupplierMatchCandidateStatus.Confirmed)
+            .OrderByDescending(candidate => candidate.ReviewedAt ?? candidate.CreatedAt)
+            .FirstOrDefault();
+        var reachableSourceCount = supplier.SourceChecks.Count(source => source.Status == SourceCheckStatus.Reachable);
+        var verifiedCertificationCount = supplier.Certifications.Count(certification => certification.IsVerified);
+        var hasRegistrationEvidence = supplier.SourceChecks.Any(source =>
+            source.Status == SourceCheckStatus.Reachable &&
+            IsRegistrationEvidence(source));
+        var hasCertificationEvidence = supplier.SourceChecks.Any(source =>
+            source.Status == SourceCheckStatus.Reachable &&
+            IsCertificationEvidence(source)) || verifiedCertificationCount > 0;
+        var missingInformation = BuildMissingInformation(
+            confirmedIdentity,
+            reachableSourceCount,
+            verifiedCertificationCount,
+            hasRegistrationEvidence,
+            hasCertificationEvidence);
+        var knownInformation = BuildKnownInformation(
+            supplier,
+            confirmedIdentity,
+            latestAssessment,
+            reachableSourceCount,
+            verifiedCertificationCount,
+            hasRegistrationEvidence,
+            hasCertificationEvidence);
+        var trustSignals = new SupplierTrustSignalsResponse(
+            confirmedIdentity is null ? "Needs review" : "Confirmed",
+            reachableSourceCount == 0 ? "Missing" : reachableSourceCount >= 3 ? "Good" : "Partial",
+            verifiedCertificationCount > 0 ? "Verified" : hasCertificationEvidence ? "Claimed" : "Missing",
+            latestAssessment is null ? "Not assessed" : latestAssessment.RiskLevel.ToString());
+        var nextAction = BuildReviewNextAction(
+            confirmedIdentity,
+            missingInformation,
+            latestAssessment);
+
+        return new SupplierReviewSummaryResponse(
+            supplier.Id,
+            supplier.Name,
+            BuildReviewHeadline(confirmedIdentity, missingInformation, latestAssessment),
+            nextAction,
+            knownInformation,
+            missingInformation,
+            trustSignals);
+    }
+
+    private static SupplierAnalyticsResponse BuildAnalytics(Supplier supplier)
+    {
+        var latestAssessment = supplier.RiskAssessments
+            .OrderByDescending(assessment => assessment.CreatedAt)
+            .FirstOrDefault();
+        var confirmedIdentity = supplier.MatchCandidates
+            .Where(candidate => candidate.Status == SupplierMatchCandidateStatus.Confirmed)
+            .OrderByDescending(candidate => candidate.ReviewedAt ?? candidate.CreatedAt)
+            .FirstOrDefault();
+        var proposedIdentityCount = supplier.MatchCandidates.Count(candidate => candidate.Status == SupplierMatchCandidateStatus.Proposed);
+        var reachableSources = supplier.SourceChecks.Count(source => source.Status == SourceCheckStatus.Reachable);
+        var failedSources = supplier.SourceChecks.Count(source => source.Status is SourceCheckStatus.Blocked or SourceCheckStatus.Failed);
+        var verifiedCertifications = supplier.Certifications.Count(certification => certification.IsVerified);
+        var claimedCertifications = supplier.Certifications.Count(certification => !certification.IsVerified);
+        var hasRegistrationEvidence = supplier.SourceChecks.Any(source =>
+            source.Status == SourceCheckStatus.Reachable &&
+            IsRegistrationEvidence(source));
+        var hasCertificationEvidence = supplier.SourceChecks.Any(source =>
+            source.Status == SourceCheckStatus.Reachable &&
+            IsCertificationEvidence(source)) || supplier.Certifications.Count > 0;
+
+        var trustBreakdown = new List<TrustBreakdownItemResponse>
+        {
+            BuildIdentityTrustItem(confirmedIdentity, proposedIdentityCount),
+            BuildEvidenceTrustItem(reachableSources, failedSources),
+            BuildCertificationTrustItem(verifiedCertifications, claimedCertifications, hasCertificationEvidence),
+            BuildRegistrationTrustItem(hasRegistrationEvidence),
+            BuildRiskTrustItem(latestAssessment, reachableSources, confirmedIdentity is not null)
+        };
+        var overallTrustScore = (int)Math.Round(trustBreakdown.Average(item => item.Score));
+        var strongestSignals = BuildStrongestSignals(
+            supplier,
+            confirmedIdentity,
+            reachableSources,
+            verifiedCertifications,
+            hasRegistrationEvidence,
+            latestAssessment);
+        var weakestGaps = BuildAnalyticsGaps(
+            confirmedIdentity,
+            reachableSources,
+            failedSources,
+            verifiedCertifications,
+            hasRegistrationEvidence,
+            latestAssessment);
+
+        return new SupplierAnalyticsResponse(
+            supplier.Id,
+            supplier.Name,
+            overallTrustScore,
+            trustBreakdown,
+            BuildSourceMix(supplier),
+            BuildTimeline(supplier),
+            strongestSignals,
+            weakestGaps);
+    }
+
+    private static TrustBreakdownItemResponse BuildIdentityTrustItem(
+        SupplierMatchCandidate? confirmedIdentity,
+        int proposedIdentityCount)
+    {
+        if (confirmedIdentity is not null)
+        {
+            return new TrustBreakdownItemResponse(
+                "Identity",
+                Math.Clamp(confirmedIdentity.ConfidenceScore, 70, 95),
+                "Confirmed",
+                $"Saved identity: {FormatIdentityName(confirmedIdentity.CandidateName)}");
+        }
+
+        if (proposedIdentityCount > 0)
+        {
+            return new TrustBreakdownItemResponse(
+                "Identity",
+                55,
+                "Needs decision",
+                $"{proposedIdentityCount} proposed identity match{(proposedIdentityCount == 1 ? string.Empty : "es")} waiting for review.");
+        }
+
+        return new TrustBreakdownItemResponse(
+            "Identity",
+            20,
+            "Missing",
+            "No confirmed or proposed legal identity is saved.");
+    }
+
+    private static TrustBreakdownItemResponse BuildEvidenceTrustItem(int reachableSources, int failedSources)
+    {
+        var score = Math.Clamp(20 + reachableSources * 18 - failedSources * 8, 10, 90);
+        var status = reachableSources switch
+        {
+            >= 4 => "Strong",
+            >= 2 => "Usable",
+            1 => "Thin",
+            _ => "Missing"
+        };
+        var explanation = reachableSources == 0
+            ? "No reachable public evidence source is saved."
+            : $"{reachableSources} reachable source{(reachableSources == 1 ? string.Empty : "s")} and {failedSources} blocked or failed source{(failedSources == 1 ? string.Empty : "s")}.";
+
+        return new TrustBreakdownItemResponse("Public evidence", score, status, explanation);
+    }
+
+    private static TrustBreakdownItemResponse BuildCertificationTrustItem(
+        int verifiedCertifications,
+        int claimedCertifications,
+        bool hasCertificationEvidence)
+    {
+        if (verifiedCertifications > 0)
+        {
+            return new TrustBreakdownItemResponse(
+                "Certifications",
+                Math.Clamp(70 + verifiedCertifications * 8, 70, 95),
+                "Verified",
+                $"{verifiedCertifications} verified certification record{(verifiedCertifications == 1 ? string.Empty : "s")} saved.");
+        }
+
+        if (claimedCertifications > 0 || hasCertificationEvidence)
+        {
+            return new TrustBreakdownItemResponse(
+                "Certifications",
+                48,
+                "Claimed",
+                "Certification evidence exists, but no certificate is verified.");
+        }
+
+        return new TrustBreakdownItemResponse(
+            "Certifications",
+            15,
+            "Missing",
+            "No certification evidence is saved.");
+    }
+
+    private static TrustBreakdownItemResponse BuildRegistrationTrustItem(bool hasRegistrationEvidence)
+    {
+        return hasRegistrationEvidence
+            ? new TrustBreakdownItemResponse(
+                "Registration",
+                78,
+                "Found",
+                "A reachable public source looks like registration or company information evidence.")
+            : new TrustBreakdownItemResponse(
+                "Registration",
+                25,
+                "Unconfirmed",
+                "No public registration evidence has been identified.");
+    }
+
+    private static TrustBreakdownItemResponse BuildRiskTrustItem(
+        RiskAssessment? latestAssessment,
+        int reachableSources,
+        bool hasConfirmedIdentity)
+    {
+        if (latestAssessment is null)
+        {
+            return new TrustBreakdownItemResponse(
+                "Risk confidence",
+                20,
+                "Not assessed",
+                "No risk assessment has been generated or saved.");
+        }
+
+        if (latestAssessment.RiskLevel == SupplierRiskLevel.Unknown)
+        {
+            return new TrustBreakdownItemResponse(
+                "Risk confidence",
+                35,
+                "Unresolved",
+                "A risk memo exists, but the risk level is still unknown. The stored numeric score is not treated as confidence.");
+        }
+
+        var score = 40 + Math.Min(reachableSources, 3) * 10 + (hasConfirmedIdentity ? 15 : 0);
+        var status = score >= 75 ? "Grounded" : score >= 55 ? "Draft" : "Provisional";
+
+        return new TrustBreakdownItemResponse(
+            "Risk confidence",
+            Math.Clamp(score, 35, 90),
+            status,
+            $"Latest risk decision is {latestAssessment.RiskLevel} at {latestAssessment.Score}/100.");
+    }
+
+    private static List<SourceMixItemResponse> BuildSourceMix(Supplier supplier)
+    {
+        var officialWebsiteCount = supplier.SourceChecks.Count(source =>
+            source.Status == SourceCheckStatus.Reachable &&
+            IsOfficialWebsiteEvidence(source));
+        var registrationCount = supplier.SourceChecks.Count(source =>
+            source.Status == SourceCheckStatus.Reachable &&
+            IsRegistrationEvidence(source));
+        var certificationCount = supplier.SourceChecks.Count(source =>
+            source.Status == SourceCheckStatus.Reachable &&
+            IsCertificationEvidence(source));
+        var failedOrBlockedCount = supplier.SourceChecks.Count(source =>
+            source.Status is SourceCheckStatus.Blocked or SourceCheckStatus.Failed);
+        var categorizedReachableCount = officialWebsiteCount + registrationCount + certificationCount;
+        var generalEvidenceCount = Math.Max(0, supplier.SourceChecks.Count(source => source.Status == SourceCheckStatus.Reachable) - categorizedReachableCount);
+
+        return new List<SourceMixItemResponse>
+        {
+            new("Official website", officialWebsiteCount, officialWebsiteCount > 0 ? "Present" : "Missing"),
+            new("Registration source", registrationCount, registrationCount > 0 ? "Present" : "Missing"),
+            new("Certification source", certificationCount, certificationCount > 0 ? "Present" : "Missing"),
+            new("General public evidence", generalEvidenceCount, generalEvidenceCount > 0 ? "Present" : "Missing"),
+            new("Blocked or failed", failedOrBlockedCount, failedOrBlockedCount > 0 ? "Needs review" : "Clear")
+        };
+    }
+
+    private static List<TimelineItemResponse> BuildTimeline(Supplier supplier)
+    {
+        var items = new List<TimelineItemResponse>
+        {
+            new(
+                supplier.CreatedAt,
+                "Supplier",
+                "Supplier created",
+                $"{supplier.Name} was added for {supplier.CountryCode} / {supplier.Industry}.",
+                "Stored")
+        };
+
+        items.AddRange(supplier.AnalysisJobs.Select(job => new TimelineItemResponse(
+            job.CompletedAt ?? job.StartedAt ?? job.CreatedAt,
+            "Analysis",
+            $"{job.Status} analysis",
+            job.ErrorMessage ?? job.ProgressMessage,
+            job.Status.ToString())));
+        items.AddRange(supplier.MatchCandidates.Select(candidate => new TimelineItemResponse(
+            candidate.ReviewedAt ?? candidate.CreatedAt,
+            "Identity",
+            $"{candidate.Status} identity",
+            FormatIdentityName(candidate.CandidateName),
+            candidate.Status.ToString())));
+        items.AddRange(supplier.SourceChecks.Select(source => new TimelineItemResponse(
+            source.CheckedAt,
+            "Evidence",
+            source.SourceName,
+            FormatSourceTimelineDescription(source),
+            source.Status.ToString())));
+        items.AddRange(supplier.Certifications.Select(certification => new TimelineItemResponse(
+            certification.CreatedAt,
+            "Certification",
+            certification.Standard,
+            certification.IsVerified ? "Verified certification record saved." : "Unverified certification claim saved.",
+            certification.IsVerified ? "Verified" : "Unverified")));
+        items.AddRange(supplier.RiskAssessments.Select(assessment => new TimelineItemResponse(
+            assessment.CreatedAt,
+            "Risk",
+            $"{assessment.RiskLevel} risk assessment",
+            $"{assessment.Focus} ({FormatRiskScore(assessment)})",
+            assessment.RiskLevel.ToString())));
+
+        return items
+            .OrderByDescending(item => item.OccurredAt)
+            .Take(12)
+            .OrderBy(item => item.OccurredAt)
+            .ToList();
+    }
+
+    private static List<string> BuildStrongestSignals(
+        Supplier supplier,
+        SupplierMatchCandidate? confirmedIdentity,
+        int reachableSources,
+        int verifiedCertifications,
+        bool hasRegistrationEvidence,
+        RiskAssessment? latestAssessment)
+    {
+        var items = new List<string>();
+
+        if (confirmedIdentity is not null)
+        {
+            items.Add($"Identity saved as {FormatIdentityName(confirmedIdentity.CandidateName)}.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(supplier.WebsiteUrl))
+        {
+            items.Add($"Supplier website is available at {FormatHost(supplier.WebsiteUrl)}.");
+        }
+
+        if (reachableSources > 0)
+        {
+            items.Add($"{reachableSources} reachable public evidence source{(reachableSources == 1 ? string.Empty : "s")}.");
+        }
+
+        if (verifiedCertifications > 0)
+        {
+            items.Add($"{verifiedCertifications} verified certification record{(verifiedCertifications == 1 ? string.Empty : "s")}.");
+        }
+
+        if (hasRegistrationEvidence)
+        {
+            items.Add("Registration-style evidence is present.");
+        }
+
+        if (latestAssessment is not null)
+        {
+            items.Add($"Latest risk memo is {latestAssessment.RiskLevel} with {FormatRiskScore(latestAssessment)}.");
+        }
+
+        if (items.Count == 0)
+        {
+            items.Add("Only the basic supplier name, country, and industry are available.");
+        }
+
+        return items.Take(5).ToList();
+    }
+
+    private static List<string> BuildAnalyticsGaps(
+        SupplierMatchCandidate? confirmedIdentity,
+        int reachableSources,
+        int failedSources,
+        int verifiedCertifications,
+        bool hasRegistrationEvidence,
+        RiskAssessment? latestAssessment)
+    {
+        var items = new List<string>();
+
+        if (confirmedIdentity is null)
+        {
+            items.Add("Save one identity match before treating evidence as final.");
+        }
+
+        if (reachableSources == 0)
+        {
+            items.Add("Add at least one reachable public source.");
+        }
+
+        if (!hasRegistrationEvidence)
+        {
+            items.Add("Find registration or company-information evidence.");
+        }
+
+        if (verifiedCertifications == 0)
+        {
+            items.Add("No certification has been verified.");
+        }
+
+        if (latestAssessment is null)
+        {
+            items.Add("No risk memo has been stored.");
+        }
+
+        if (failedSources > 0)
+        {
+            items.Add($"{failedSources} source{(failedSources == 1 ? " is" : "s are")} blocked or failed.");
+        }
+
+        return items.Take(6).ToList();
+    }
+
+    private static List<string> BuildKnownInformation(
+        Supplier supplier,
+        SupplierMatchCandidate? confirmedIdentity,
+        RiskAssessment? latestAssessment,
+        int reachableSourceCount,
+        int verifiedCertificationCount,
+        bool hasRegistrationEvidence,
+        bool hasCertificationEvidence)
+    {
+        var items = new List<string>
+        {
+            confirmedIdentity is null
+                ? $"Supplier record: {supplier.Name} in {supplier.CountryCode} for {supplier.Industry}"
+                : $"Confirmed identity: {FormatIdentityName(confirmedIdentity.CandidateName)}"
+        };
+
+        var website = supplier.WebsiteUrl ?? confirmedIdentity?.WebsiteUrl;
+        if (!string.IsNullOrWhiteSpace(website))
+        {
+            items.Add($"Website available: {FormatHost(website)}");
+        }
+
+        items.Add(hasRegistrationEvidence
+            ? "Legal registration evidence found in public sources"
+            : "Legal registration evidence still needs confirmation");
+        items.Add(verifiedCertificationCount > 0
+            ? $"Verified certifications saved: {verifiedCertificationCount}"
+            : hasCertificationEvidence
+                ? "Certification evidence found but not verified"
+                : "No verified certification saved yet");
+        items.Add(reachableSourceCount > 0
+            ? $"{reachableSourceCount} reachable public evidence source{(reachableSourceCount == 1 ? string.Empty : "s")}"
+            : "No reachable public evidence source yet");
+
+        if (latestAssessment is not null)
+        {
+            items.Add($"Current risk view: {latestAssessment.RiskLevel}");
+        }
+
+        return items;
+    }
+
+    private static List<string> BuildMissingInformation(
+        SupplierMatchCandidate? confirmedIdentity,
+        int reachableSourceCount,
+        int verifiedCertificationCount,
+        bool hasRegistrationEvidence,
+        bool hasCertificationEvidence)
+    {
+        var items = new List<string>();
+
+        if (confirmedIdentity is null)
+        {
+            items.Add("Supplier identity is not confirmed.");
+        }
+
+        if (!hasRegistrationEvidence)
+        {
+            items.Add("Legal registration evidence still needs confirmation.");
+        }
+
+        if (verifiedCertificationCount == 0)
+        {
+            items.Add(hasCertificationEvidence
+                ? "Certification evidence exists but no certification is verified."
+                : "No verified certification evidence found.");
+        }
+
+        if (reachableSourceCount == 0)
+        {
+            items.Add("No reachable public evidence source confirmed.");
+        }
+
+        return items;
+    }
+
+    private static SupplierReviewNextActionResponse BuildReviewNextAction(
+        SupplierMatchCandidate? confirmedIdentity,
+        IReadOnlyList<string> missingInformation,
+        RiskAssessment? latestAssessment)
+    {
+        if (confirmedIdentity is null)
+        {
+            return new SupplierReviewNextActionResponse(
+                "ConfirmIdentity",
+                "Confirm supplier identity",
+                "Review possible legal entities and save the supplier identity before trusting evidence or reports.",
+                "Review matches",
+                "identity");
+        }
+
+        if (missingInformation.Count > 0)
+        {
+            return new SupplierReviewNextActionResponse(
+                "ReviewEvidence",
+                "Close evidence gaps",
+                "Important verification evidence is still missing or unverified.",
+                "Review evidence",
+                "evidence");
+        }
+
+        if (latestAssessment is null)
+        {
+            return new SupplierReviewNextActionResponse(
+                "ReviewRisk",
+                "Review risk",
+                "Evidence exists, but no stored risk decision is available yet.",
+                "Open risk",
+                "risk");
+        }
+
+        return new SupplierReviewNextActionResponse(
+            "PrepareReport",
+            "Prepare report",
+            "The main review inputs are available. Check recommendations before exporting.",
+            "Open report",
+            "report");
+    }
+
+    private static string BuildReviewHeadline(
+        SupplierMatchCandidate? confirmedIdentity,
+        IReadOnlyList<string> missingInformation,
+        RiskAssessment? latestAssessment)
+    {
+        if (confirmedIdentity is null)
+        {
+            return "Identity needs review";
+        }
+
+        if (missingInformation.Count > 0)
+        {
+            return "Identity confirmed, evidence gaps remain";
+        }
+
+        return latestAssessment is null
+            ? "Identity confirmed, risk pending"
+            : "Supplier review is ready";
+    }
+
+    private static bool IsRegistrationEvidence(SourceCheck sourceCheck)
+    {
+        return sourceCheck.SourceName.Contains("registry", StringComparison.OrdinalIgnoreCase) ||
+            sourceCheck.SourceName.Contains("company information", StringComparison.OrdinalIgnoreCase) ||
+            sourceCheck.Url.Contains("company-information", StringComparison.OrdinalIgnoreCase) ||
+            sourceCheck.Url.Contains("opencorporates", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsCertificationEvidence(SourceCheck sourceCheck)
+    {
+        return sourceCheck.SourceName.Contains("cert", StringComparison.OrdinalIgnoreCase) ||
+            sourceCheck.Notes.Contains("ISO ", StringComparison.OrdinalIgnoreCase) ||
+            sourceCheck.Notes.Contains("certificate", StringComparison.OrdinalIgnoreCase) ||
+            sourceCheck.Url.Contains("cert", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsOfficialWebsiteEvidence(SourceCheck sourceCheck)
+    {
+        return sourceCheck.SourceName.Contains("supplier website", StringComparison.OrdinalIgnoreCase) ||
+            sourceCheck.SourceName.Contains("website research", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string FormatSourceTimelineDescription(SourceCheck sourceCheck)
+    {
+        var category = IsRegistrationEvidence(sourceCheck)
+            ? "registration evidence"
+            : IsCertificationEvidence(sourceCheck)
+                ? "certification evidence"
+                : IsOfficialWebsiteEvidence(sourceCheck)
+                    ? "official website evidence"
+                    : "public evidence";
+
+        return $"{formatSourceStatus(sourceCheck.Status)} {category}: {FormatHost(sourceCheck.Url)}";
+
+        static string formatSourceStatus(SourceCheckStatus status)
+        {
+            return status switch
+            {
+                SourceCheckStatus.Reachable => "Reachable",
+                SourceCheckStatus.Blocked => "Blocked",
+                SourceCheckStatus.Failed => "Failed",
+                _ => "Unchecked"
+            };
+        }
+    }
+
+    private static string FormatRiskScore(RiskAssessment assessment)
+    {
+        return assessment.RiskLevel == SupplierRiskLevel.Unknown
+            ? "not scored"
+            : $"{assessment.Score}/100";
+    }
+
+    private static string FormatIdentityName(string value)
+    {
+        var normalized = value
+            .Replace("**", string.Empty, StringComparison.Ordinal)
+            .Trim();
+        var companyNumberIndex = normalized.IndexOf(" (company number", StringComparison.OrdinalIgnoreCase);
+        if (companyNumberIndex > 0)
+        {
+            return normalized[..companyNumberIndex].Trim();
+        }
+
+        foreach (var marker in new[] { " is ", " operates ", " appears ", " runs ", " specializes ", " specialises " })
+        {
+            var markerIndex = normalized.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (markerIndex > 0 && markerIndex <= 80)
+            {
+                return normalized[..markerIndex].Trim();
+            }
+        }
+
+        return normalized.Length <= 90 ? normalized : normalized[..87].Trim() + "...";
+    }
+
+    private static string FormatHost(string url)
+    {
+        return Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            ? uri.Host
+            : url;
     }
 
     private static string BuildRiskAssessmentSystemPrompt()

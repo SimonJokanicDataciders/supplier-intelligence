@@ -12,6 +12,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<SupplierFact> SupplierFacts => Set<SupplierFact>();
     public DbSet<RiskAssessment> RiskAssessments => Set<RiskAssessment>();
     public DbSet<AnalysisJob> AnalysisJobs => Set<AnalysisJob>();
+    public DbSet<SupplierMatchCandidate> SupplierMatchCandidates => Set<SupplierMatchCandidate>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -69,6 +70,37 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             analysisJob.HasOne(j => j.Supplier)
                 .WithMany(s => s.AnalysisJobs)
                 .HasForeignKey(j => j.SupplierId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<SupplierMatchCandidate>(candidate =>
+        {
+            candidate.Property(c => c.CandidateName)
+                .HasMaxLength(220)
+                .IsRequired();
+
+            candidate.Property(c => c.CountryCode)
+                .HasMaxLength(2);
+
+            candidate.Property(c => c.WebsiteUrl)
+                .HasMaxLength(500);
+
+            candidate.Property(c => c.SourceName)
+                .HasMaxLength(160);
+
+            candidate.Property(c => c.SourceUrl)
+                .HasMaxLength(500);
+
+            candidate.Property(c => c.MatchReason)
+                .HasMaxLength(1000);
+
+            candidate.Property(c => c.Status)
+                .HasConversion<string>()
+                .HasMaxLength(30);
+
+            candidate.HasOne(c => c.Supplier)
+                .WithMany(s => s.MatchCandidates)
+                .HasForeignKey(c => c.SupplierId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 

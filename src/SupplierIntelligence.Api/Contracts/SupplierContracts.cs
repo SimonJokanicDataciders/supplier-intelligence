@@ -35,6 +35,15 @@ public sealed record CheckSourceEvidenceRequest(
     string SourceName,
     string Url);
 
+public sealed record CreateSupplierMatchCandidateRequest(
+    string CandidateName,
+    string? CountryCode,
+    string? WebsiteUrl,
+    string? SourceName,
+    string? SourceUrl,
+    int ConfidenceScore,
+    string MatchReason);
+
 public sealed record CreateRiskAssessmentRequest(
     SupplierRiskLevel RiskLevel,
     int Score,
@@ -90,6 +99,69 @@ public sealed record AnalysisJobResponse(
     DateTime CreatedAt,
     DateTime? StartedAt,
     DateTime? CompletedAt);
+
+public sealed record SupplierMatchCandidateResponse(
+    int Id,
+    string CandidateName,
+    string? CountryCode,
+    string? WebsiteUrl,
+    string? SourceName,
+    string? SourceUrl,
+    int ConfidenceScore,
+    string MatchReason,
+    SupplierMatchCandidateStatus Status,
+    DateTime CreatedAt,
+    DateTime? ReviewedAt);
+
+public sealed record SupplierReviewSummaryResponse(
+    int SupplierId,
+    string SupplierName,
+    string Headline,
+    SupplierReviewNextActionResponse NextAction,
+    IReadOnlyList<string> KnownInformation,
+    IReadOnlyList<string> MissingInformation,
+    SupplierTrustSignalsResponse TrustSignals);
+
+public sealed record SupplierReviewNextActionResponse(
+    string Type,
+    string Title,
+    string Description,
+    string ButtonLabel,
+    string Step);
+
+public sealed record SupplierTrustSignalsResponse(
+    string Identity,
+    string Evidence,
+    string Certifications,
+    string Risk);
+
+public sealed record SupplierAnalyticsResponse(
+    int SupplierId,
+    string SupplierName,
+    int OverallTrustScore,
+    IReadOnlyList<TrustBreakdownItemResponse> TrustBreakdown,
+    IReadOnlyList<SourceMixItemResponse> SourceMix,
+    IReadOnlyList<TimelineItemResponse> Timeline,
+    IReadOnlyList<string> StrongestSignals,
+    IReadOnlyList<string> WeakestGaps);
+
+public sealed record TrustBreakdownItemResponse(
+    string Label,
+    int Score,
+    string Status,
+    string Explanation);
+
+public sealed record SourceMixItemResponse(
+    string Label,
+    int Count,
+    string Status);
+
+public sealed record TimelineItemResponse(
+    DateTime OccurredAt,
+    string Type,
+    string Title,
+    string Description,
+    string Status);
 
 public sealed record CertificationResponse(
     int Id,

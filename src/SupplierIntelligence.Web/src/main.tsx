@@ -2,10 +2,20 @@ import { StrictMode, useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
   archiveSupplier,
+  confirmSupplierMatchCandidate,
   createSupplier,
+  getSupplierAnalytics,
+  getSupplierAnalysisJob,
+  getSupplierAnalysisJobs,
+  getSupplierMatchCandidates,
   getLocalModelStatus,
   getSupplier,
+  getSupplierReviewSummary,
   getSuppliers,
+  queueSupplierAnalysis,
+  rejectSupplierMatchCandidate,
+  suggestSupplierMatchCandidates,
+  type ReviewStepName,
   type AnalysisJob,
   type Certification,
   type CreateSupplierInput,
@@ -14,9 +24,15 @@ import {
   type RiskLevel,
   type ResearchSource,
   type SourceCheck,
+  type SourceMixItem,
   type SupplierFact,
+  type SupplierAnalytics,
   type SupplierDetail,
+  type SupplierMatchCandidate,
+  type SupplierReviewSummary,
   type SupplierSummary,
+  type TimelineItem,
+  type TrustBreakdownItem,
 } from './api.ts'
 import './styles.css'
 
@@ -25,22 +41,29 @@ const emptySupplierForm: CreateSupplierInput = {
   countryCode: '',
   industry: '',
   websiteUrl: '',
-  registryNumber: '',
-  vatNumber: '',
-  certificationHints: '',
   runInitialAnalysis: true,
 }
+
+type ReviewStep = ReviewStepName
 
 function App() {
   const [suppliers, setSuppliers] = useState<SupplierSummary[]>([])
   const [selectedSupplierId, setSelectedSupplierId] = useState<number | null>(null)
   const [supplier, setSupplier] = useState<SupplierDetail | null>(null)
+  const [reviewSummary, setReviewSummary] = useState<SupplierReviewSummary | null>(null)
+  const [supplierAnalytics, setSupplierAnalytics] = useState<SupplierAnalytics | null>(null)
+  const [matchCandidates, setMatchCandidates] = useState<SupplierMatchCandidate[]>([])
   const [supplierForm, setSupplierForm] = useState<CreateSupplierInput>(emptySupplierForm)
   const [localModelStatus, setLocalModelStatus] = useState<LocalModelStatus | null>(null)
+  const [activeAnalysisJob, setActiveAnalysisJob] = useState<AnalysisJob | null>(null)
   const [loading, setLoading] = useState(true)
   const [checkingLocalModel, setCheckingLocalModel] = useState(false)
   const [creatingSupplier, setCreatingSupplier] = useState(false)
   const [archivingSupplier, setArchivingSupplier] = useState(false)
+  const [queueingAnalysis, setQueueingAnalysis] = useState(false)
+  const [loadingMatchCandidates, setLoadingMatchCandidates] = useState(false)
+  const [reviewingMatchCandidateId, setReviewingMatchCandidateId] = useState<number | null>(null)
+  const [activeReviewStep, setActiveReviewStep] = useState<ReviewStep>('identity')
   const [error, setError] = useState<string | null>(null)
   const visibleSuppliers = useMemo(() => buildVisibleSuppliers(suppliers), [suppliers])
 
@@ -51,23 +74,32 @@ function App() {
 
   useEffect(() => {
     if (selectedSupplierId === null) {
+      setReviewSummary(null)
+      setSupplierAnalytics(null)
+      setActiveAnalysisJob(null)
+      setMatchCandidates([])
       return
     }
 
+    setActiveReviewStep('identity')
     void loadSupplier(selectedSupplierId)
+    void loadReviewSummary(selectedSupplierId)
+    void loadSupplierAnalytics(selectedSupplierId)
+    void loadAnalysisJobs(selectedSupplierId)
+    void loadMatchCandidates(selectedSupplierId)
   }, [selectedSupplierId])
 
   useEffect(() => {
-    if (supplier === null || !hasActiveAnalysisJob(supplier.analysisJobs)) {
+    if (supplier === null || !activeAnalysisJob || !isActiveAnalysisJob(activeAnalysisJob)) {
       return
     }
 
     const intervalId = window.setInterval(() => {
-      void loadSupplier(supplier.id)
+      void refreshAnalysisRun(supplier.id, activeAnalysisJob.id)
     }, 3000)
 
     return () => window.clearInterval(intervalId)
-  }, [supplier])
+  }, [supplier, activeAnalysisJob])
 
   async function loadSuppliers() {
     setLoading(true)
@@ -96,6 +128,54 @@ function App() {
       setSupplier(normalizeSupplierDetail(await getSupplier(id)))
     } catch (exception) {
       setError(readError(exception))
+    }
+  }
+
+  async function loadReviewSummary(id: number) {
+    setError(null)
+
+    try {
+      setReviewSummary(await getSupplierReviewSummary(id))
+    } catch (exception) {
+      setError(readError(exception))
+    }
+  }
+
+  async function loadSupplierAnalytics(id: number) {
+    setError(null)
+
+    try {
+      setSupplierAnalytics(await getSupplierAnalytics(id))
+    } catch (exception) {
+      setError(readError(exception))
+    }
+  }
+
+  async function loadAnalysisJobs(supplierId: number) {
+    setError(null)
+
+    try {
+      const jobs = await getSupplierAnalysisJobs(supplierId)
+      setActiveAnalysisJob(findActiveOrLatestAnalysisJob(jobs))
+    } catch (exception) {
+      setError(readError(exception))
+    }
+  }
+
+  async function loadMatchCandidates(supplierId: number, quiet = false) {
+    if (!quiet) {
+      setLoadingMatchCandidates(true)
+    }
+    setError(null)
+
+    try {
+      setMatchCandidates(await getSupplierMatchCandidates(supplierId))
+    } catch (exception) {
+      setError(readError(exception))
+    } finally {
+      if (!quiet) {
+        setLoadingMatchCandidates(false)
+      }
     }
   }
 
@@ -131,6 +211,10 @@ function App() {
       setSuppliers(supplierList)
       setSupplier(createdSupplierDetail)
       setSelectedSupplierId(createdSupplier.id)
+      setMatchCandidates([])
+      await loadReviewSummary(createdSupplier.id)
+      await loadSupplierAnalytics(createdSupplier.id)
+      await loadMatchCandidates(createdSupplier.id)
       setSupplierForm(emptySupplierForm)
       void loadLocalModelStatus()
     } catch (exception) {
@@ -157,14 +241,119 @@ function App() {
       setSuppliers(supplierList)
       setSelectedSupplierId(nextSupplierId)
       setSupplier(null)
+      setReviewSummary(null)
+      setSupplierAnalytics(null)
+      setMatchCandidates([])
 
       if (nextSupplierId !== null) {
         await loadSupplier(nextSupplierId)
+        await loadReviewSummary(nextSupplierId)
+        await loadSupplierAnalytics(nextSupplierId)
+        await loadMatchCandidates(nextSupplierId)
       }
     } catch (exception) {
       setError(readError(exception))
     } finally {
       setArchivingSupplier(false)
+    }
+  }
+
+  async function runAnalysis() {
+    if (supplier === null) {
+      return
+    }
+
+    setQueueingAnalysis(true)
+    setError(null)
+
+    try {
+      const job = await queueSupplierAnalysis(supplier.id)
+      setActiveAnalysisJob(job)
+      await refreshAnalysisRun(supplier.id, job.id)
+    } catch (exception) {
+      setError(readError(exception))
+    } finally {
+      setQueueingAnalysis(false)
+    }
+  }
+
+  async function refreshAnalysisRun(supplierId: number, jobId: number) {
+    setError(null)
+
+    try {
+      const [job] = await Promise.all([
+        getSupplierAnalysisJob(supplierId, jobId),
+        loadSupplier(supplierId),
+        loadReviewSummary(supplierId),
+        loadSupplierAnalytics(supplierId),
+        loadMatchCandidates(supplierId, true),
+      ])
+
+      setActiveAnalysisJob(job)
+      if (!isActiveAnalysisJob(job)) {
+        void loadSuppliers()
+      }
+    } catch (exception) {
+      setError(readError(exception))
+    }
+  }
+
+  async function findMatchCandidates() {
+    if (supplier === null) {
+      return
+    }
+
+    setLoadingMatchCandidates(true)
+    setError(null)
+
+    try {
+      setMatchCandidates(await suggestSupplierMatchCandidates(supplier.id))
+      await loadReviewSummary(supplier.id)
+      await loadSupplierAnalytics(supplier.id)
+    } catch (exception) {
+      setError(readError(exception))
+    } finally {
+      setLoadingMatchCandidates(false)
+    }
+  }
+
+  async function confirmMatchCandidate(candidateId: number) {
+    if (supplier === null) {
+      return
+    }
+
+    setReviewingMatchCandidateId(candidateId)
+    setError(null)
+
+    try {
+      await confirmSupplierMatchCandidate(supplier.id, candidateId)
+      await loadMatchCandidates(supplier.id)
+      await loadReviewSummary(supplier.id)
+      await loadSupplierAnalytics(supplier.id)
+    } catch (exception) {
+      setError(readError(exception))
+    } finally {
+      setReviewingMatchCandidateId(null)
+    }
+  }
+
+  async function rejectMatchCandidate(candidateId: number) {
+    if (supplier === null) {
+      return
+    }
+
+    setReviewingMatchCandidateId(candidateId)
+    setError(null)
+
+    try {
+      await rejectSupplierMatchCandidate(supplier.id, candidateId)
+      await loadMatchCandidates(supplier.id)
+      await loadReviewSummary(supplier.id)
+      await loadSupplierAnalytics(supplier.id)
+    } catch (exception) {
+      setError(readError(exception))
+    } finally {
+      setReviewingMatchCandidateId(null)
     }
   }
 
@@ -178,9 +367,6 @@ function App() {
     [supplier],
   )
   const latestAssessment = assessments[0]
-  const latestAnalysisJob = supplier
-    ? [...safeArray(supplier.analysisJobs)].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0]
-    : undefined
   const latestEvidenceQuality = latestAssessment
     ? readEvidenceQuality(latestAssessment.evidenceSnapshotJson)
     : null
@@ -196,6 +382,35 @@ function App() {
   const nextEvidenceItems = supplier ? buildNextEvidenceItems(supplier, reachableSourceCount) : []
   const knownSupplierFacts = supplier ? buildKnownSupplierFacts(supplier.supplierFacts) : []
   const usefulResearchSources = supplier ? buildUsefulResearchSources(supplier.researchSources) : []
+  const visibleMatchCandidates = buildVisibleMatchCandidates(matchCandidates)
+  const confirmedIdentity = matchCandidates.find((candidate) => candidate.status === 'Confirmed') ?? null
+  const hasConfirmedIdentity = confirmedIdentity !== null
+  const knownInformation = supplier
+    ? buildKnownInformation({
+        supplier,
+        confirmedIdentity,
+        latestAssessment,
+        latestEvidenceQuality,
+        reachableSourceCount,
+      })
+    : []
+  const riskMemoItems = buildRiskMemoItems({
+    hasConfirmedIdentity,
+    latestAssessment,
+    latestEvidenceQuality,
+    nextEvidenceItems,
+  })
+  const nextAction = buildNextAction({
+    hasConfirmedIdentity,
+    loadingMatchCandidates,
+    matchCandidateCount: visibleMatchCandidates.length,
+    nextEvidenceCount: nextEvidenceItems.length,
+    latestAssessment,
+  })
+  const displayKnownInformation = reviewSummary?.knownInformation ?? knownInformation
+  const displayMissingInformation = reviewSummary?.missingInformation ?? nextEvidenceItems
+  const displayNextAction = reviewSummary?.nextAction ?? nextAction
+  const displayTrustSignals = reviewSummary?.trustSignals ?? null
 
   return (
     <main className="app-shell">
@@ -249,50 +464,6 @@ function App() {
                   setSupplierForm({
                     ...supplierForm,
                     websiteUrl: event.target.value === '' ? null : event.target.value,
-                  })
-                }
-              />
-            </label>
-
-            <label>
-              Registry number
-              <input
-                maxLength={80}
-                value={supplierForm.registryNumber ?? ''}
-                onChange={(event) =>
-                  setSupplierForm({
-                    ...supplierForm,
-                    registryNumber: event.target.value === '' ? null : event.target.value,
-                  })
-                }
-              />
-            </label>
-
-            <label>
-              VAT number
-              <input
-                maxLength={80}
-                value={supplierForm.vatNumber ?? ''}
-                onChange={(event) =>
-                  setSupplierForm({
-                    ...supplierForm,
-                    vatNumber: event.target.value === '' ? null : event.target.value,
-                  })
-                }
-              />
-            </label>
-
-            <label>
-              Certification hints
-              <textarea
-                maxLength={500}
-                placeholder="ISO 9001, ISO 14001, IATF 16949"
-                rows={3}
-                value={supplierForm.certificationHints ?? ''}
-                onChange={(event) =>
-                  setSupplierForm({
-                    ...supplierForm,
-                    certificationHints: event.target.value === '' ? null : event.target.value,
                   })
                 }
               />
@@ -353,13 +524,24 @@ function App() {
                   </a>
                 )}
                 <div className="supplier-facts">
-                  <Fact label="Registry" value={supplier.registryNumber} />
-                  <Fact label="VAT" value={supplier.vatNumber} />
-                  <Fact label="Certification hints" value={supplier.certificationHints} />
+                  <Fact label="Country" value={supplier.countryCode} />
+                  <Fact label="Industry" value={supplier.industry} />
                 </div>
               </div>
               <div className="supplier-header-actions">
                 <RiskBadge level={supplier.riskLevel} />
+                <button
+                  className="primary"
+                  disabled={queueingAnalysis || isActiveAnalysisJob(activeAnalysisJob)}
+                  onClick={runAnalysis}
+                  type="button"
+                >
+                  {queueingAnalysis
+                    ? 'Queueing...'
+                    : isActiveAnalysisJob(activeAnalysisJob)
+                      ? 'Analysis running'
+                      : 'Run analysis'}
+                </button>
                 <button
                   className="ghost"
                   disabled={archivingSupplier}
@@ -371,182 +553,320 @@ function App() {
               </div>
             </div>
 
-            <div className="metric-grid">
-              <Metric label="Certifications" value={supplier.certifications.length} />
-              <Metric label="Evidence sources" value={supplier.sourceChecks.length} />
-              <Metric label="Assessments" value={supplier.riskAssessments.length} />
-            </div>
-
-            <section className="workflow-strip">
-              <WorkflowStep
-                isDone={supplier.certifications.length > 0}
-                label="1. Certification"
-                value={`${supplier.certifications.length} discovered`}
-              />
-              <WorkflowStep
-                isDone={supplier.sourceChecks.length > 0}
-                label="2. Public evidence"
-                value={`${supplier.sourceChecks.length} sources`}
-              />
-              <WorkflowStep
-                isDone={localModelStatus?.isReachable ?? false}
-                label="3. Intelligence review"
-                value={assessments.length > 0 ? 'available' : 'pending'}
-              />
-              <WorkflowStep
-                isDone={latestAnalysisJob?.status === 'Completed' || assessments.length > 0}
-                label="4. Risk decision"
-                value={
-                  latestAnalysisJob && latestAnalysisJob.status !== 'Completed'
-                    ? latestAnalysisJob.status
-                    : latestAssessment
-                      ? `${latestAssessment.riskLevel} / ${latestAssessment.score}`
-                      : 'none'
-                }
-              />
-            </section>
-
-            {latestEvidenceQuality && (
-              <section className="quality-panel">
+            <section className="review-overview">
+              <div className="next-action-card">
                 <div className="section-heading">
-                  <p>Verification status</p>
-                  <span>{latestEvidenceQuality.band}</span>
+                  <p>Next action</p>
+                  <span>{reviewSummary?.headline ?? nextAction.status}</span>
                 </div>
-                <div className="quality-grid">
-                  <StatusField label="Evidence strength" value={`${latestEvidenceQuality.score}/100`} />
-                  <StatusField label="Certification verified" value={formatBoolean(latestEvidenceQuality.hasVerifiedCertification)} />
-                  <StatusField label="Registry verified" value={formatBoolean(latestEvidenceQuality.hasReachableRegistrySource)} />
-                  <StatusField label="VAT verified" value={formatBoolean(latestEvidenceQuality.hasReachableVatSource)} />
-                </div>
-              </section>
-            )}
+                <h2>{displayNextAction.title}</h2>
+                <p>{displayNextAction.description}</p>
+                <button
+                  className="primary"
+                  disabled={!hasConfirmedIdentity && loadingMatchCandidates}
+                  onClick={() => {
+                    if (displayNextAction.step === 'identity' && !hasConfirmedIdentity) {
+                      setActiveReviewStep('identity')
+                      void findMatchCandidates()
+                      return
+                    }
 
-            {latestEvidenceSnapshot && (
-              <section className="supplier-intelligence-panel">
-                <div className="section-heading">
-                  <p>Supplier snapshot</p>
-                  <span>{latestEvidenceSnapshot.supplierProfile.isSparseInput ? 'Limited public profile' : 'Detailed public profile'}</span>
-                </div>
-                <div className="supplier-intelligence-grid">
-                  <StatusField label="Profile completeness" value={`${latestEvidenceSnapshot.supplierProfile.inputDepth}/7`} />
-                  <StatusField label="Current assessment" value={latestEvidenceSnapshot.riskDecision.reason} />
-                </div>
-                <p className="company-description">{latestEvidenceSnapshot.companySummary.description}</p>
-                <SnapshotList title="External evidence" items={latestEvidenceSnapshot.companySummary.externalHighlights} />
-                <SnapshotList title="Own website evidence" items={latestEvidenceSnapshot.companySummary.ownWebsiteHighlights} />
-                <SnapshotList title="Known facts" items={latestEvidenceSnapshot.automationFindings} />
-              </section>
-            )}
-
-            {(knownSupplierFacts.length > 0 || usefulResearchSources.length > 0) && (
-              <section className="supplier-intelligence-panel">
-                <div className="section-heading">
-                  <p>Validated facts</p>
-                  <span>{knownSupplierFacts.length} facts</span>
-                </div>
-                <SnapshotList title="Supplier facts" items={knownSupplierFacts} />
-                <SnapshotList title="Research sources" items={usefulResearchSources} />
-              </section>
-            )}
-
-            {nextEvidenceItems.length > 0 && (
-              <section className="missing-facts-panel">
-                <div className="section-heading">
-                  <p>Missing facts</p>
-                  <span>{nextEvidenceItems.length} open</span>
-                </div>
-                <ul>
-                  {nextEvidenceItems.map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              </section>
-            )}
-
-            <section className="evidence-panel">
-              <div className="workflow-card">
-                <div className="section-heading">
-                  <p>Certifications</p>
-                  <span>{supplier.certifications.length} records</span>
-                </div>
-                <CompactCertificationList certifications={supplier.certifications} />
-                {latestEvidenceSnapshot && (
-                  <SnapshotList title="Expected certifications and documents" items={latestEvidenceSnapshot.expectedEvidence} />
-                )}
+                    setActiveReviewStep(displayNextAction.step)
+                  }}
+                  type="button"
+                >
+                  {!hasConfirmedIdentity && loadingMatchCandidates ? 'Finding matches...' : displayNextAction.buttonLabel}
+                </button>
               </div>
 
-              <div className="workflow-card">
+              <section className="dashboard-card">
                 <div className="section-heading">
-                  <p>Evidence</p>
-                  <span>{supplier.sourceChecks.length} sources</span>
+                  <p>What we know</p>
+                  <span>{displayTrustSignals?.identity ?? (hasConfirmedIdentity ? 'Identity saved' : 'Needs decision')}</span>
                 </div>
-                <CompactSourceCheckList sourceChecks={supplier.sourceChecks} />
-              </div>
-            </section>
-
-            <section className="workspace read-only-workspace">
-              <div className="assessment-list">
-                <div className="section-heading">
-                  <p>Risk summary</p>
-                  <span>{assessments.length} total</span>
-                </div>
-
-                {assessments.length === 0 ? (
-                  <p className="muted evidence-empty">No assessments yet.</p>
-                ) : (
-                  assessments.map((assessment) => (
-                    <article className="assessment" key={assessment.id}>
-                      <div className="assessment-topline">
-                        <RiskBadge level={assessment.riskLevel} />
-                        <strong>{assessment.score}/100</strong>
-                        <span>
-                        Supplier intelligence
-                      </span>
-                      </div>
-                      <p className="assessment-summary">{assessment.summaryMarkdown}</p>
-                      <details className="assessment-full-text">
-                        <summary>Detailed reasoning</summary>
-                        <pre>{assessment.summaryMarkdown}</pre>
-                      </details>
-                    </article>
-                  ))
-                )}
-              </div>
-            </section>
-
-            <details className="technical-details">
-              <summary>Technical details</summary>
-              <section className="analysis-job-panel">
-                <div className="section-heading">
-                  <p>Analysis jobs</p>
-                  <span>{supplier.analysisJobs.length} total</span>
-                </div>
-                <AnalysisJobList jobs={supplier.analysisJobs} />
-              </section>
-
-              <section className="local-model-panel">
-                <div className="section-heading">
-                  <p>Local model runtime</p>
-                  <span>{checkingLocalModel ? 'checking' : localModelStatus?.isReachable ? 'online' : 'offline'}</span>
-                </div>
-                <div className="local-model-grid">
-                  <StatusField label="Provider" value={localModelStatus?.provider ?? 'Unknown'} />
-                  <StatusField label="Default model" value={localModelStatus?.defaultModel ?? 'Unknown'} />
-                  <StatusField label="Base URL" value={localModelStatus?.baseUrl ?? 'Unknown'} />
-                  <StatusField label="Evidence score" value={`${evidenceCompletenessScore}/3`} />
-                </div>
-                {localModelStatus?.errorMessage && <p className="local-model-error">{localModelStatus.errorMessage}</p>}
-                {localModelStatus?.models.length ? (
-                  <div className="model-list">
-                    {localModelStatus.models.map((model) => (
-                      <span key={model.name}>{model.name}</span>
-                    ))}
+                <KnownInformationList items={displayKnownInformation} />
+                {displayTrustSignals && (
+                  <div className="trust-signal-row">
+                    <StatusField label="Evidence" value={displayTrustSignals.evidence} />
+                    <StatusField label="Certifications" value={displayTrustSignals.certifications} />
+                    <StatusField label="Risk" value={displayTrustSignals.risk} />
                   </div>
-                ) : (
-                  <p className="muted local-model-empty">No local models reported.</p>
+                )}
+                {supplierAnalytics && (
+                  <TrustBreakdown
+                    compact
+                    overallTrustScore={supplierAnalytics.overallTrustScore}
+                    items={supplierAnalytics.trustBreakdown}
+                  />
                 )}
               </section>
-            </details>
+            </section>
+
+            {activeAnalysisJob && (
+              <AnalysisRunPanel
+                analytics={supplierAnalytics}
+                job={activeAnalysisJob}
+                matchCandidates={matchCandidates}
+                supplier={supplier}
+                latestAssessment={latestAssessment}
+              />
+            )}
+
+            <nav className="review-stepper" aria-label="Supplier review steps">
+              <ReviewStepButton
+                activeStep={activeReviewStep}
+                label="Identity"
+                step="identity"
+                summary={summarizeMatchCandidates(visibleMatchCandidates)}
+                onSelect={setActiveReviewStep}
+              />
+              <ReviewStepButton
+                activeStep={activeReviewStep}
+                label="Evidence"
+                step="evidence"
+                summary={`${supplier.sourceChecks.length} sources`}
+                onSelect={setActiveReviewStep}
+              />
+              <ReviewStepButton
+                activeStep={activeReviewStep}
+                label="Risk"
+                step="risk"
+                summary={latestAssessment ? latestAssessment.riskLevel : 'None'}
+                onSelect={setActiveReviewStep}
+              />
+              <ReviewStepButton
+                activeStep={activeReviewStep}
+                label="Report"
+                step="report"
+                summary={hasConfirmedIdentity ? 'Draft later' : 'Blocked'}
+                onSelect={setActiveReviewStep}
+              />
+            </nav>
+
+            <section className="review-workspace">
+              {activeReviewStep === 'identity' && (
+                <section className="match-candidate-panel">
+                  <div className="section-heading">
+                    <p>{hasConfirmedIdentity ? 'Saved identity' : 'Possible identities'}</p>
+                    <span>{summarizeMatchCandidates(visibleMatchCandidates)}</span>
+                  </div>
+                  {confirmedIdentity && (
+                    <div className="saved-identity-banner">
+                      <strong>{formatCandidateDisplayName(confirmedIdentity.candidateName)}</strong>
+                      <span>Saved as the confirmed supplier identity.</span>
+                    </div>
+                  )}
+                  <div className="match-candidate-toolbar">
+                    <p>
+                      Confirming saves the selected legal entity on this supplier record. Rejected identities stay dismissed.
+                    </p>
+                    <button
+                      className="primary"
+                      disabled={loadingMatchCandidates}
+                      onClick={findMatchCandidates}
+                      type="button"
+                    >
+                      {loadingMatchCandidates ? 'Finding matches...' : 'Find matches'}
+                    </button>
+                  </div>
+                  <MatchCandidateList
+                    candidates={visibleMatchCandidates}
+                    isLoading={loadingMatchCandidates}
+                    reviewingCandidateId={reviewingMatchCandidateId}
+                    onConfirm={confirmMatchCandidate}
+                    onReject={rejectMatchCandidate}
+                  />
+                </section>
+              )}
+
+              {activeReviewStep === 'evidence' && (
+                <>
+                  {displayMissingInformation.length > 0 && (
+                    <section className="missing-facts-panel">
+                      <div className="section-heading">
+                        <p>Missing facts</p>
+                        <span>{displayMissingInformation.length} open</span>
+                      </div>
+                      <ul>
+                        {displayMissingInformation.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    </section>
+                  )}
+
+                  <section className="evidence-panel">
+                    <div className="workflow-card">
+                      <div className="section-heading">
+                        <p>Certifications</p>
+                        <span>{supplier.certifications.length} records</span>
+                      </div>
+                      <CompactCertificationList certifications={supplier.certifications} />
+                      {latestEvidenceSnapshot && (
+                        <SnapshotList title="Expected certifications and documents" items={latestEvidenceSnapshot.expectedEvidence} />
+                      )}
+                    </div>
+
+                    <div className="workflow-card">
+                      <div className="section-heading">
+                        <p>Evidence</p>
+                        <span>{supplier.sourceChecks.length} sources</span>
+                      </div>
+                      <CompactSourceCheckList sourceChecks={supplier.sourceChecks} />
+                    </div>
+                  </section>
+
+                  {(knownSupplierFacts.length > 0 || usefulResearchSources.length > 0) && (
+                    <details className="secondary-details">
+                      <summary>Validated facts and research notes</summary>
+                      <section className="supplier-intelligence-panel">
+                        <SnapshotList title="Supplier facts" items={knownSupplierFacts} />
+                        <SnapshotList title="Research sources" items={usefulResearchSources} />
+                      </section>
+                    </details>
+                  )}
+                </>
+              )}
+
+              {activeReviewStep === 'risk' && (
+                <>
+                  <section className="risk-memo-panel">
+                    <div className="section-heading">
+                      <p>Risk memo</p>
+                      <span>{latestAssessment ? latestAssessment.riskLevel : 'No assessment'}</span>
+                    </div>
+                    <div className="risk-memo-headline">
+                      <RiskBadge level={latestAssessment?.riskLevel ?? 'Unknown'} />
+                      <strong>{formatRiskAssessmentScore(latestAssessment)}</strong>
+                    </div>
+                    <ul>
+                      {riskMemoItems.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </section>
+
+                  <details className="secondary-details">
+                    <summary>Evidence behind this risk memo</summary>
+                    {latestEvidenceQuality && (
+                      <section className="quality-panel">
+                        <div className="section-heading">
+                          <p>Verification status</p>
+                          <span>{latestEvidenceQuality.band}</span>
+                        </div>
+                        <div className="quality-grid">
+                          <StatusField label="Evidence strength" value={`${latestEvidenceQuality.score}/100`} />
+                          <StatusField label="Certification verified" value={formatBoolean(latestEvidenceQuality.hasVerifiedCertification)} />
+                          <StatusField label="Registration evidence" value={formatBoolean(latestEvidenceQuality.hasReachableRegistrySource)} />
+                          <StatusField label="Tax evidence" value={formatBoolean(latestEvidenceQuality.hasReachableVatSource)} />
+                        </div>
+                      </section>
+                    )}
+
+                    {latestEvidenceSnapshot && (
+                      <section className="supplier-intelligence-panel">
+                        <div className="section-heading">
+                          <p>Supplier snapshot</p>
+                          <span>{latestEvidenceSnapshot.supplierProfile.isSparseInput ? 'Limited public profile' : 'Detailed public profile'}</span>
+                        </div>
+                        <div className="supplier-intelligence-grid">
+                          <StatusField label="Profile completeness" value={`${latestEvidenceSnapshot.supplierProfile.inputDepth}/7`} />
+                          <StatusField label="Current assessment" value={latestEvidenceSnapshot.riskDecision.reason} />
+                        </div>
+                        <p className="company-description">{latestEvidenceSnapshot.companySummary.description}</p>
+                        <SnapshotList title="External evidence" items={latestEvidenceSnapshot.companySummary.externalHighlights} />
+                        <SnapshotList title="Own website evidence" items={latestEvidenceSnapshot.companySummary.ownWebsiteHighlights} />
+                        <SnapshotList title="Known facts" items={latestEvidenceSnapshot.automationFindings} />
+                      </section>
+                    )}
+                  </details>
+
+                  <details className="secondary-details">
+                    <summary>Full risk assessment text</summary>
+                    <section className="workspace read-only-workspace">
+                      <div className="assessment-list">
+                        {assessments.length === 0 ? (
+                          <p className="muted evidence-empty">No assessments yet.</p>
+                        ) : (
+                          assessments.map((assessment) => (
+                            <article className="assessment" key={assessment.id}>
+                              <div className="assessment-topline">
+                                <RiskBadge level={assessment.riskLevel} />
+                                <strong>{formatRiskAssessmentScore(assessment)}</strong>
+                                <span>Supplier intelligence</span>
+                              </div>
+                              <p className="assessment-summary">{assessment.summaryMarkdown}</p>
+                              <details className="assessment-full-text">
+                                <summary>Detailed reasoning</summary>
+                                <pre>{assessment.summaryMarkdown}</pre>
+                              </details>
+                            </article>
+                          ))
+                        )}
+                      </div>
+                    </section>
+                  </details>
+                </>
+              )}
+
+              {activeReviewStep === 'report' && (
+                <section className="report-panel">
+                  <div className="section-heading">
+                    <p>Report</p>
+                    <span>{hasConfirmedIdentity ? 'Draft-ready' : 'Blocked'}</span>
+                  </div>
+                  <div className="report-grid">
+                    <StatusField label="Supplier profile" value={supplier.name} />
+                    <StatusField label="Confirmed identity" value={hasConfirmedIdentity ? 'Yes' : 'No'} />
+                    <StatusField label="Evidence sources" value={`${supplier.sourceChecks.length}`} />
+                    <StatusField label="Risk decision" value={latestAssessment ? latestAssessment.riskLevel : 'None'} />
+                  </div>
+                  {latestEvidenceSnapshot ? (
+                    <SnapshotList title="Recommended next checks" items={latestEvidenceSnapshot.recommendedNextChecks} />
+                  ) : (
+                    <p className="muted evidence-empty">No report recommendations available yet.</p>
+                  )}
+
+                  {supplierAnalytics && (
+                    <SupplierAnalyticsPanel analytics={supplierAnalytics} />
+                  )}
+
+                  <details className="secondary-details">
+                    <summary>Technical details</summary>
+                    <section className="analysis-job-panel">
+                      <div className="section-heading">
+                        <p>Analysis jobs</p>
+                        <span>{supplier.analysisJobs.length} total</span>
+                      </div>
+                      <AnalysisJobList jobs={supplier.analysisJobs} />
+                    </section>
+
+                    <section className="local-model-panel">
+                      <div className="section-heading">
+                        <p>Model runtime</p>
+                        <span>{checkingLocalModel ? 'checking' : localModelStatus?.isReachable ? 'online' : 'offline'}</span>
+                      </div>
+                      <div className="local-model-grid">
+                        <StatusField label="Provider" value={localModelStatus?.provider ?? 'Unknown'} />
+                        <StatusField label="Default model" value={localModelStatus?.defaultModel ?? 'Unknown'} />
+                        <StatusField label="Base URL" value={localModelStatus?.baseUrl ?? 'Unknown'} />
+                        <StatusField label="Evidence score" value={`${evidenceCompletenessScore}/3`} />
+                      </div>
+                      {localModelStatus?.errorMessage && <p className="local-model-error">{localModelStatus.errorMessage}</p>}
+                      {localModelStatus?.models.length ? (
+                        <div className="model-list">
+                          {localModelStatus.models.map((model) => (
+                            <span key={model.name}>{model.name}</span>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="muted local-model-empty">No provider models reported.</p>
+                      )}
+                    </section>
+                  </details>
+                </section>
+              )}
+            </section>
           </>
         ) : (
           <p className="muted">Select a supplier.</p>
@@ -569,6 +889,31 @@ function WorkflowStep({ isDone, label, value }: { isDone: boolean; label: string
   )
 }
 
+function ReviewStepButton({
+  activeStep,
+  label,
+  step,
+  summary,
+  onSelect,
+}: {
+  activeStep: ReviewStep
+  label: string
+  step: ReviewStep
+  summary: string
+  onSelect: (step: ReviewStep) => void
+}) {
+  return (
+    <button
+      className={activeStep === step ? 'review-step active' : 'review-step'}
+      onClick={() => onSelect(step)}
+      type="button"
+    >
+      <span>{label}</span>
+      <strong>{summary}</strong>
+    </button>
+  )
+}
+
 function Metric({ label, value }: { label: string; value: number }) {
   return (
     <div className="metric">
@@ -587,6 +932,169 @@ function StatusField({ label, value }: { label: string; value: string }) {
   )
 }
 
+function KnownInformationList({ items }: { items: string[] }) {
+  return (
+    <ul className="known-info-list">
+      {items.map((item) => (
+        <li key={item}>{item}</li>
+      ))}
+    </ul>
+  )
+}
+
+function TrustBreakdown({
+  compact = false,
+  overallTrustScore,
+  items,
+}: {
+  compact?: boolean
+  overallTrustScore: number
+  items: TrustBreakdownItem[]
+}) {
+  return (
+    <div className={compact ? 'trust-breakdown compact' : 'trust-breakdown'}>
+      <div className="trust-score-header">
+        <strong>Trust score</strong>
+        <span>{overallTrustScore}/100</span>
+      </div>
+      <div className="trust-bar-list">
+        {items.map((item) => (
+          <div className="trust-bar-row" key={item.label}>
+            <div className="trust-bar-label">
+              <strong>{item.label}</strong>
+              <span>{item.status}</span>
+            </div>
+            <div className="trust-bar-track" aria-label={`${item.label}: ${item.score} out of 100`}>
+              <span style={{ width: `${item.score}%` }} />
+            </div>
+            {!compact && <p>{item.explanation}</p>}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function SupplierAnalyticsPanel({ analytics }: { analytics: SupplierAnalytics }) {
+  return (
+    <section className="analytics-panel">
+      <div className="section-heading">
+        <p>Analytics</p>
+        <span>{analytics.overallTrustScore}/100 trust</span>
+      </div>
+      <div className="analytics-grid">
+        <TrustBreakdown overallTrustScore={analytics.overallTrustScore} items={analytics.trustBreakdown} />
+        <SourceMixList items={analytics.sourceMix} />
+      </div>
+      <div className="analytics-grid">
+        <SnapshotList title="Strongest signals" items={analytics.strongestSignals} />
+        <SnapshotList title="Weakest gaps" items={analytics.weakestGaps} />
+      </div>
+      <TimelineList items={analytics.timeline} />
+    </section>
+  )
+}
+
+function AnalysisRunPanel({
+  analytics,
+  job,
+  matchCandidates,
+  supplier,
+  latestAssessment,
+}: {
+  analytics: SupplierAnalytics | null
+  job: AnalysisJob
+  matchCandidates: SupplierMatchCandidate[]
+  supplier: SupplierDetail
+  latestAssessment: RiskAssessment | undefined
+}) {
+  const stages = buildAnalysisStages({ analytics, job, matchCandidates, supplier, latestAssessment })
+  const reachableSourceCount = supplier.sourceChecks.filter((sourceCheck) => sourceCheck.status === 'Reachable').length
+  const failedSourceCount = supplier.sourceChecks.filter(
+    (sourceCheck) => sourceCheck.status === 'Blocked' || sourceCheck.status === 'Failed',
+  ).length
+
+  return (
+    <section className={`analysis-run-panel analysis-run-${job.status.toLowerCase()}`}>
+      <div className="section-heading">
+        <p>{isActiveAnalysisJob(job) ? 'Analysis running' : `Analysis ${job.status.toLowerCase()}`}</p>
+        <span>{job.progressMessage}</span>
+      </div>
+      <div className="analysis-run-grid">
+        <div className="analysis-stage-list">
+          {stages.map((stage) => (
+            <div className={`analysis-stage analysis-stage-${stage.status}`} key={stage.label}>
+              <span>{formatStageMarker(stage.status)}</span>
+              <div>
+                <strong>{stage.label}</strong>
+                <small>{stage.detail}</small>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="analysis-live-summary">
+          <StatusField label="Evidence found" value={`${reachableSourceCount} reachable / ${failedSourceCount} failed`} />
+          <StatusField label="Facts extracted" value={`${supplier.supplierFacts.length}`} />
+          <StatusField label="Identity candidates" value={`${matchCandidates.length}`} />
+          <StatusField label="Trust score" value={analytics ? `${analytics.overallTrustScore}/100` : 'Pending'} />
+        </div>
+      </div>
+      {job.errorMessage && <p className="analysis-run-error">{job.errorMessage}</p>}
+    </section>
+  )
+}
+
+function SourceMixList({ items }: { items: SourceMixItem[] }) {
+  const maxCount = Math.max(1, ...items.map((item) => item.count))
+
+  return (
+    <div className="source-mix-panel">
+      <div className="trust-score-header">
+        <strong>Source mix</strong>
+        <span>{items.reduce((total, item) => total + item.count, 0)} records</span>
+      </div>
+      <div className="source-mix-list">
+        {items.map((item) => (
+          <div className="source-mix-row" key={item.label}>
+            <div>
+              <strong>{item.label}</strong>
+              <span>{item.status}</span>
+            </div>
+            <div className="trust-bar-track">
+              <span style={{ width: `${(item.count / maxCount) * 100}%` }} />
+            </div>
+            <strong>{item.count}</strong>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function TimelineList({ items }: { items: TimelineItem[] }) {
+  if (items.length === 0) {
+    return null
+  }
+
+  return (
+    <div className="timeline-panel">
+      <strong>Review timeline</strong>
+      <div className="timeline-list">
+        {items.map((item) => (
+          <article className="timeline-item" key={`${item.occurredAt}-${item.type}-${item.title}`}>
+            <span>{formatShortDate(item.occurredAt)}</span>
+            <div>
+              <strong>{item.title}</strong>
+              <p>{item.description}</p>
+            </div>
+            <small>{item.status}</small>
+          </article>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function Fact({ label, value }: { label: string; value: string | null }) {
   if (!value) {
     return null
@@ -600,8 +1108,229 @@ function Fact({ label, value }: { label: string; value: string | null }) {
   )
 }
 
-function hasActiveAnalysisJob(jobs: AnalysisJob[]) {
-  return safeArray(jobs).some((job) => job.status === 'Queued' || job.status === 'Running')
+function MatchCandidateList({
+  candidates,
+  isLoading,
+  reviewingCandidateId,
+  onConfirm,
+  onReject,
+}: {
+  candidates: SupplierMatchCandidate[]
+  isLoading: boolean
+  reviewingCandidateId: number | null
+  onConfirm: (candidateId: number) => void
+  onReject: (candidateId: number) => void
+}) {
+  if (isLoading && candidates.length === 0) {
+    return <p className="muted evidence-empty">Finding possible supplier identities...</p>
+  }
+
+  if (candidates.length === 0) {
+    return <p className="muted evidence-empty">No match candidates proposed yet.</p>
+  }
+
+  return (
+    <div className="match-candidate-list">
+      {[...candidates]
+        .sort(compareMatchCandidates)
+        .map((candidate) => {
+          const isReviewing = reviewingCandidateId === candidate.id
+          const isTerminal = candidate.status === 'Confirmed' || candidate.status === 'Rejected'
+
+          return (
+            <article className={`match-candidate match-${candidate.status.toLowerCase()}`} key={candidate.id}>
+              <div className="match-candidate-title">
+                <div>
+                  <strong>{formatCandidateDisplayName(candidate.candidateName)}</strong>
+                  <span>{formatCandidateLocation(candidate)}</span>
+                </div>
+                <span className="match-confidence">
+                  {formatMatchConfidence(candidate.confidenceScore)} · {candidate.confidenceScore}/100
+                </span>
+              </div>
+              <p>{candidate.matchReason}</p>
+              <div className="match-candidate-meta">
+                <span>{formatCandidateStatus(candidate.status)}</span>
+                {candidate.sourceName && <span>{candidate.sourceName}</span>}
+                {candidate.websiteUrl && (
+                  <a href={candidate.websiteUrl} rel="noreferrer" target="_blank">
+                    Website
+                  </a>
+                )}
+                {candidate.sourceUrl && candidate.sourceUrl !== candidate.websiteUrl && (
+                  <a href={candidate.sourceUrl} rel="noreferrer" target="_blank">
+                    Source
+                  </a>
+                )}
+              </div>
+              <div className="match-candidate-actions">
+                <button
+                  className="primary"
+                  disabled={isReviewing || candidate.status === 'Confirmed'}
+                  onClick={() => onConfirm(candidate.id)}
+                  type="button"
+                >
+                  {candidate.status === 'Confirmed' ? 'Saved identity' : isReviewing ? 'Saving...' : 'Save as identity'}
+                </button>
+                <button
+                  className="ghost"
+                  disabled={isReviewing || isTerminal}
+                  onClick={() => onReject(candidate.id)}
+                  type="button"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </article>
+          )
+        })}
+    </div>
+  )
+}
+
+function isActiveAnalysisJob(job: AnalysisJob | null | undefined) {
+  return job?.status === 'Queued' || job?.status === 'Running'
+}
+
+function findActiveOrLatestAnalysisJob(jobs: AnalysisJob[]) {
+  const sortedJobs = [...safeArray(jobs)].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+
+  return sortedJobs.find(isActiveAnalysisJob) ?? sortedJobs[0] ?? null
+}
+
+type AnalysisStageStatus = 'done' | 'active' | 'pending' | 'failed'
+
+type AnalysisStage = {
+  label: string
+  detail: string
+  status: AnalysisStageStatus
+}
+
+function buildAnalysisStages({
+  analytics,
+  job,
+  matchCandidates,
+  supplier,
+  latestAssessment,
+}: {
+  analytics: SupplierAnalytics | null
+  job: AnalysisJob
+  matchCandidates: SupplierMatchCandidate[]
+  supplier: SupplierDetail
+  latestAssessment: RiskAssessment | undefined
+}): AnalysisStage[] {
+  const progress = job.progressMessage.toLowerCase()
+  const isFailed = job.status === 'Failed'
+  const isCompleted = job.status === 'Completed'
+  const reachableSourceCount = supplier.sourceChecks.filter((sourceCheck) => sourceCheck.status === 'Reachable').length
+  const websiteChecked = supplier.sourceChecks.some((sourceCheck) =>
+    sourceCheck.sourceName.toLowerCase().includes('website'),
+  )
+  const factsExtracted = supplier.supplierFacts.length > 0
+  const riskMemoReady = Boolean(latestAssessment)
+  const analyticsReady = Boolean(analytics)
+
+  return [
+    {
+      label: 'Queued',
+      detail: formatAnalysisJobTime(job.createdAt),
+      status: stageStatus({ done: job.status !== 'Queued', active: job.status === 'Queued', isFailed }),
+    },
+    {
+      label: 'Website checked',
+      detail: websiteChecked ? 'Website evidence stored' : 'Skipped if no website exists',
+      status: stageStatus({
+        done: websiteChecked || isCompleted,
+        active: progress.includes('website'),
+        isFailed,
+      }),
+    },
+    {
+      label: 'Public evidence',
+      detail: reachableSourceCount > 0 ? `${reachableSourceCount} reachable source${reachableSourceCount === 1 ? '' : 's'}` : 'Searching sources',
+      status: stageStatus({
+        done: reachableSourceCount > 0 || isCompleted,
+        active: progress.includes('search') || progress.includes('evidence'),
+        isFailed,
+      }),
+    },
+    {
+      label: 'Facts extracted',
+      detail: factsExtracted ? `${supplier.supplierFacts.length} fact${supplier.supplierFacts.length === 1 ? '' : 's'} stored` : 'Waiting for source text',
+      status: stageStatus({
+        done: factsExtracted || isCompleted,
+        active: progress.includes('facts'),
+        isFailed,
+      }),
+    },
+    {
+      label: 'Risk memo',
+      detail: latestAssessment ? `${latestAssessment.riskLevel} / ${formatRiskAssessmentScore(latestAssessment)}` : 'Not generated yet',
+      status: stageStatus({
+        done: riskMemoReady || isCompleted,
+        active: progress.includes('risk memo'),
+        isFailed,
+      }),
+    },
+    {
+      label: 'Analytics refreshed',
+      detail: analytics ? `${analytics.overallTrustScore}/100 trust score` : 'Waiting for analysis data',
+      status: stageStatus({
+        done: analyticsReady && isCompleted,
+        active: progress.includes('analytics'),
+        isFailed,
+      }),
+    },
+    {
+      label: 'Identity review',
+      detail: matchCandidates.length > 0 ? `${matchCandidates.length} candidate${matchCandidates.length === 1 ? '' : 's'} available` : 'Can be reviewed after evidence',
+      status: stageStatus({
+        done: matchCandidates.some((candidate) => candidate.status === 'Confirmed'),
+        active: matchCandidates.some((candidate) => candidate.status === 'Proposed'),
+        isFailed,
+      }),
+    },
+  ]
+}
+
+function stageStatus({
+  done,
+  active,
+  isFailed,
+}: {
+  done: boolean
+  active: boolean
+  isFailed: boolean
+}): AnalysisStageStatus {
+  if (done) {
+    return 'done'
+  }
+
+  if (isFailed) {
+    return 'failed'
+  }
+
+  return active ? 'active' : 'pending'
+}
+
+function formatStageMarker(status: AnalysisStageStatus) {
+  if (status === 'done') {
+    return 'OK'
+  }
+
+  if (status === 'active') {
+    return '...'
+  }
+
+  if (status === 'failed') {
+    return 'ERR'
+  }
+
+  return '--'
+}
+
+function formatAnalysisJobTime(value: string) {
+  return `Started ${formatShortDate(value)}`
 }
 
 function safeArray<T>(value: T[] | null | undefined) {
@@ -663,6 +1392,111 @@ function isDevelopmentSupplier(item: SupplierSummary) {
     website.includes('127.0.0.1') ||
     website.includes('example.com') ||
     website.includes('learning-demo')
+}
+
+function buildVisibleMatchCandidates(candidates: SupplierMatchCandidate[]) {
+  const visible = new Map<string, SupplierMatchCandidate>()
+
+  for (const candidate of candidates) {
+    if (candidate.status === 'Rejected') {
+      continue
+    }
+
+    const key = [
+      normalizeIdentityPart(formatCandidateDisplayName(candidate.candidateName)),
+      candidate.countryCode?.trim().toUpperCase() ?? '',
+    ].join('|')
+    const existing = visible.get(key)
+
+    if (!existing || compareMatchCandidates(candidate, existing) < 0) {
+      visible.set(key, candidate)
+    }
+  }
+
+  return [...visible.values()].sort(compareMatchCandidates)
+}
+
+function buildKnownInformation({
+  supplier,
+  confirmedIdentity,
+  latestAssessment,
+  latestEvidenceQuality,
+  reachableSourceCount,
+}: {
+  supplier: SupplierDetail
+  confirmedIdentity: SupplierMatchCandidate | null
+  latestAssessment: RiskAssessment | undefined
+  latestEvidenceQuality: EvidenceQuality | null
+  reachableSourceCount: number
+}) {
+  const verifiedCertifications = supplier.certifications.filter((certification) => certification.isVerified)
+  const items = [
+    confirmedIdentity
+      ? `Confirmed identity: ${formatCandidateDisplayName(confirmedIdentity.candidateName)}`
+      : `Supplier record: ${supplier.name} in ${supplier.countryCode} for ${supplier.industry}`,
+  ]
+
+  if (supplier.websiteUrl || confirmedIdentity?.websiteUrl) {
+    items.push(`Website available: ${readHostname(supplier.websiteUrl ?? confirmedIdentity?.websiteUrl ?? null)}`)
+  }
+
+  if (latestEvidenceQuality?.hasReachableRegistrySource) {
+    items.push('Registry evidence found in public sources')
+  } else {
+    items.push('Legal registration evidence still needs confirmation')
+  }
+
+  items.push(
+    verifiedCertifications.length > 0
+      ? `Verified certifications: ${verifiedCertifications.map((certification) => certification.standard).join(', ')}`
+      : 'No verified certification saved yet',
+  )
+
+  items.push(
+    reachableSourceCount > 0
+      ? `${reachableSourceCount} reachable public evidence source${reachableSourceCount === 1 ? '' : 's'}`
+      : 'No reachable public evidence source yet',
+  )
+
+  if (latestAssessment) {
+    items.push(`Current risk view: ${latestAssessment.riskLevel}`)
+  }
+
+  return items
+}
+
+function buildRiskMemoItems({
+  hasConfirmedIdentity,
+  latestAssessment,
+  latestEvidenceQuality,
+  nextEvidenceItems,
+}: {
+  hasConfirmedIdentity: boolean
+  latestAssessment: RiskAssessment | undefined
+  latestEvidenceQuality: EvidenceQuality | null
+  nextEvidenceItems: string[]
+}) {
+  const items = [
+    hasConfirmedIdentity
+      ? 'The supplier identity has been saved, so evidence can be interpreted against a selected entity.'
+      : 'The supplier identity is not saved yet, so risk is provisional.',
+  ]
+
+  if (latestAssessment) {
+    items.push(`Latest stored risk decision: ${latestAssessment.riskLevel} with ${formatRiskAssessmentScore(latestAssessment).toLowerCase()}.`)
+  } else {
+    items.push('No stored risk decision exists yet.')
+  }
+
+  if (latestEvidenceQuality) {
+    items.push(`Evidence quality is ${latestEvidenceQuality.band.toLowerCase()} at ${latestEvidenceQuality.score}/100.`)
+  }
+
+  if (nextEvidenceItems.length > 0) {
+    items.push(`Main blocker: ${nextEvidenceItems[0]}`)
+  }
+
+  return items
 }
 
 function buildKnownSupplierFacts(facts: SupplierFact[]) {
@@ -785,6 +1619,187 @@ function formatBoolean(value: boolean) {
   return value ? 'Yes' : 'No'
 }
 
+function formatShortDate(value: string) {
+  const timestamp = Date.parse(value)
+
+  if (Number.isNaN(timestamp)) {
+    return value
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(timestamp))
+}
+
+function formatRiskAssessmentScore(assessment: RiskAssessment | undefined) {
+  if (!assessment) {
+    return 'No score yet'
+  }
+
+  if (assessment.riskLevel === 'Unknown') {
+    return 'Not scored'
+  }
+
+  return `${assessment.score}/100`
+}
+
+function buildNextAction({
+  hasConfirmedIdentity,
+  loadingMatchCandidates,
+  matchCandidateCount,
+  nextEvidenceCount,
+  latestAssessment,
+}: {
+  hasConfirmedIdentity: boolean
+  loadingMatchCandidates: boolean
+  matchCandidateCount: number
+  nextEvidenceCount: number
+  latestAssessment: RiskAssessment | undefined
+}): {
+  title: string
+  description: string
+  buttonLabel: string
+  status: string
+  step: ReviewStep
+} {
+  if (!hasConfirmedIdentity) {
+    return {
+      title: 'Confirm supplier identity',
+      description: matchCandidateCount > 0
+        ? 'Review the proposed legal entities and confirm the one this supplier record should represent.'
+        : 'Find possible legal entities before trusting evidence, risk, or reports.',
+      buttonLabel: loadingMatchCandidates ? 'Finding matches...' : matchCandidateCount > 0 ? 'Review matches' : 'Find matches',
+      status: 'Identity blocker',
+      step: 'identity',
+    }
+  }
+
+  if (nextEvidenceCount > 0) {
+    return {
+      title: 'Close evidence gaps',
+      description: 'The identity is confirmed, but important verification gaps still need review.',
+      buttonLabel: 'Review evidence',
+      status: `${nextEvidenceCount} open gaps`,
+      step: 'evidence',
+    }
+  }
+
+  if (!latestAssessment) {
+    return {
+      title: 'Review risk',
+      description: 'Evidence is available, but no risk decision has been stored for this supplier yet.',
+      buttonLabel: 'Open risk',
+      status: 'Risk pending',
+      step: 'risk',
+    }
+  }
+
+  return {
+    title: 'Prepare report',
+    description: 'The main review inputs are available. Check recommendations before exporting a report.',
+    buttonLabel: 'Open report',
+    status: 'Ready',
+    step: 'report',
+  }
+}
+
+function summarizeMatchCandidates(candidates: SupplierMatchCandidate[]) {
+  const confirmed = candidates.filter((candidate) => candidate.status === 'Confirmed').length
+  const proposed = candidates.filter((candidate) => candidate.status === 'Proposed').length
+
+  if (confirmed > 0) {
+    return `${confirmed} confirmed`
+  }
+
+  if (proposed > 0) {
+    return `${proposed} proposed`
+  }
+
+  return `${candidates.length} candidates`
+}
+
+function compareMatchCandidates(a: SupplierMatchCandidate, b: SupplierMatchCandidate) {
+  return matchStatusRank(b.status) - matchStatusRank(a.status) ||
+    b.confidenceScore - a.confidenceScore ||
+    Date.parse(b.createdAt) - Date.parse(a.createdAt)
+}
+
+function matchStatusRank(status: SupplierMatchCandidate['status']) {
+  if (status === 'Confirmed') {
+    return 3
+  }
+
+  if (status === 'Proposed') {
+    return 2
+  }
+
+  return 1
+}
+
+function formatCandidateLocation(candidate: SupplierMatchCandidate) {
+  return [candidate.countryCode, readHostname(candidate.websiteUrl)]
+    .filter(Boolean)
+    .join(' · ') || 'No location details'
+}
+
+function formatCandidateDisplayName(value: string) {
+  const normalized = value
+    .replace(/\*\*/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  const companyNumberIndex = normalized.search(/\s+\(company\s+number/i)
+  if (companyNumberIndex > 0) {
+    return normalized.slice(0, companyNumberIndex).trim()
+  }
+
+  const sentenceMarker = normalized.search(/\s+(is|operates|appears|runs|speciali[sz]es)\s+/i)
+  if (sentenceMarker > 0 && sentenceMarker <= 80) {
+    return normalized.slice(0, sentenceMarker).trim()
+  }
+
+  return shortenText(normalized, 90)
+}
+
+function readHostname(url: string | null) {
+  if (!url) {
+    return null
+  }
+
+  try {
+    return new URL(url).hostname
+  } catch {
+    return url
+  }
+}
+
+function formatMatchConfidence(score: number) {
+  if (score >= 75) {
+    return 'Strong match'
+  }
+
+  if (score >= 50) {
+    return 'Plausible match'
+  }
+
+  return 'Weak match'
+}
+
+function formatCandidateStatus(status: SupplierMatchCandidate['status']) {
+  if (status === 'Confirmed') {
+    return 'Saved'
+  }
+
+  if (status === 'Rejected') {
+    return 'Dismissed'
+  }
+
+  return 'Needs decision'
+}
+
 function SnapshotList({ title, items }: { title: string; items: string[] }) {
   if (items.length === 0) {
     return null
@@ -833,11 +1848,7 @@ function buildNextEvidenceItems(supplier: SupplierDetail, reachableSourceCount: 
   }
 
   if (!supplier.sourceChecks.some((sourceCheck) => sourceCheck.sourceName.toLowerCase().includes('registry'))) {
-    items.push(
-      supplier.registryNumber || supplier.vatNumber
-        ? 'Provided registry or VAT identifier still needs verification.'
-        : 'Company registry record not verified.',
-    )
+    items.push('Company registration evidence not verified.')
   }
 
   if (reachableSourceCount === 0) {

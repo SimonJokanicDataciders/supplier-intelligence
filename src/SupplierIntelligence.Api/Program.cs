@@ -77,5 +77,7 @@ if (app.Environment.IsDevelopment())
 
 app.MapLocalModelEndpoints();
 app.MapSupplierEndpoints();
+app.MapSupplierAnalysisJobEndpoints();
+app.MapSupplierMatchCandidateEndpoints();
 
 app.Run();

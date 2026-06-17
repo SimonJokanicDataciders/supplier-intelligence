@@ -76,6 +76,8 @@ export type RiskAssessment = {
 
 export type AnalysisJobStatus = 'Queued' | 'Running' | 'Completed' | 'Failed'
 
+export type SupplierMatchCandidateStatus = 'Proposed' | 'Confirmed' | 'Rejected'
+
 export type AnalysisJob = {
   id: number
   jobType: string
@@ -87,6 +89,20 @@ export type AnalysisJob = {
   completedAt: string | null
 }
 
+export type SupplierMatchCandidate = {
+  id: number
+  candidateName: string
+  countryCode: string | null
+  websiteUrl: string | null
+  sourceName: string | null
+  sourceUrl: string | null
+  confidenceScore: number
+  matchReason: string
+  status: SupplierMatchCandidateStatus
+  createdAt: string
+  reviewedAt: string | null
+}
+
 export type SupplierDetail = SupplierSummary & {
   createdAt: string
   analysisJobs: AnalysisJob[]
@@ -95,6 +111,65 @@ export type SupplierDetail = SupplierSummary & {
   researchSources: ResearchSource[]
   supplierFacts: SupplierFact[]
   riskAssessments: RiskAssessment[]
+}
+
+export type SupplierReviewSummary = {
+  supplierId: number
+  supplierName: string
+  headline: string
+  nextAction: SupplierReviewNextAction
+  knownInformation: string[]
+  missingInformation: string[]
+  trustSignals: SupplierTrustSignals
+}
+
+export type SupplierReviewNextAction = {
+  type: string
+  title: string
+  description: string
+  buttonLabel: string
+  step: ReviewStepName
+}
+
+export type ReviewStepName = 'identity' | 'evidence' | 'risk' | 'report'
+
+export type SupplierTrustSignals = {
+  identity: string
+  evidence: string
+  certifications: string
+  risk: string
+}
+
+export type SupplierAnalytics = {
+  supplierId: number
+  supplierName: string
+  overallTrustScore: number
+  trustBreakdown: TrustBreakdownItem[]
+  sourceMix: SourceMixItem[]
+  timeline: TimelineItem[]
+  strongestSignals: string[]
+  weakestGaps: string[]
+}
+
+export type TrustBreakdownItem = {
+  label: string
+  score: number
+  status: string
+  explanation: string
+}
+
+export type SourceMixItem = {
+  label: string
+  count: number
+  status: string
+}
+
+export type TimelineItem = {
+  occurredAt: string
+  type: string
+  title: string
+  description: string
+  status: string
 }
 
 export type LocalModelInfo = {
@@ -117,9 +192,6 @@ export type CreateSupplierInput = {
   countryCode: string
   industry: string
   websiteUrl: string | null
-  registryNumber: string | null
-  vatNumber: string | null
-  certificationHints: string | null
   runInitialAnalysis: boolean
 }
 
@@ -197,6 +269,32 @@ export function getSupplier(id: number) {
   return request<SupplierDetail>(`/api/suppliers/${id}`)
 }
 
+export function getSupplierReviewSummary(id: number) {
+  return request<SupplierReviewSummary>(`/api/suppliers/${id}/review-summary`)
+}
+
+export function getSupplierAnalytics(id: number) {
+  return request<SupplierAnalytics>(`/api/suppliers/${id}/analytics`)
+}
+
+export function getSupplierAnalysisJobs(supplierId: number) {
+  return request<AnalysisJob[]>(`/api/suppliers/${supplierId}/analysis-jobs`)
+}
+
+export function getSupplierAnalysisJob(supplierId: number, jobId: number) {
+  return request<AnalysisJob>(`/api/suppliers/${supplierId}/analysis-jobs/${jobId}`)
+}
+
+export function queueSupplierAnalysis(supplierId: number) {
+  return request<AnalysisJob>(`/api/suppliers/${supplierId}/analysis-jobs`, {
+    method: 'POST',
+  })
+}
+
+export function getSupplierMatchCandidates(supplierId: number) {
+  return request<SupplierMatchCandidate[]>(`/api/suppliers/${supplierId}/match-candidates`)
+}
+
 export function getLocalModelStatus() {
   return request<LocalModelStatus>('/api/local-models/')
 }
@@ -212,6 +310,30 @@ export function archiveSupplier(id: number) {
   return request<void>(`/api/suppliers/${id}/archive`, {
     method: 'POST',
   })
+}
+
+export function suggestSupplierMatchCandidates(supplierId: number) {
+  return request<SupplierMatchCandidate[]>(`/api/suppliers/${supplierId}/match-candidates/suggest`, {
+    method: 'POST',
+  })
+}
+
+export function confirmSupplierMatchCandidate(supplierId: number, candidateId: number) {
+  return request<SupplierMatchCandidate>(
+    `/api/suppliers/${supplierId}/match-candidates/${candidateId}/confirm`,
+    {
+      method: 'POST',
+    },
+  )
+}
+
+export function rejectSupplierMatchCandidate(supplierId: number, candidateId: number) {
+  return request<SupplierMatchCandidate>(
+    `/api/suppliers/${supplierId}/match-candidates/${candidateId}/reject`,
+    {
+      method: 'POST',
+    },
+  )
 }
 
 export function createRiskAssessment(supplierId: number, input: RiskAssessmentInput) {

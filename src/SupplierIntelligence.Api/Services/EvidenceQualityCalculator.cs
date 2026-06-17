@@ -91,6 +91,13 @@ public static class EvidenceQualityCalculator
     public static int EstimateRiskScore(Supplier supplier)
     {
         var quality = Calculate(supplier);
+        var riskLevel = EstimateRiskLevel(supplier);
+
+        if (riskLevel == SupplierRiskLevel.Unknown)
+        {
+            return 0;
+        }
+
         var score = quality.HasVerifiedCertification
             ? 80 - quality.Score
             : 100 - quality.Score;

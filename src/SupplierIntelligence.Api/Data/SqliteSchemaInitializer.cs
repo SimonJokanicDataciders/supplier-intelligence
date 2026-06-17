@@ -61,6 +61,26 @@ public static class SqliteSchemaInitializer
             cancellationToken);
 
         await db.Database.ExecuteSqlRawAsync(
+            """
+            CREATE TABLE IF NOT EXISTS "SupplierMatchCandidates" (
+                "Id" INTEGER NOT NULL CONSTRAINT "PK_SupplierMatchCandidates" PRIMARY KEY AUTOINCREMENT,
+                "SupplierId" INTEGER NOT NULL,
+                "CandidateName" TEXT NOT NULL,
+                "CountryCode" TEXT NULL,
+                "WebsiteUrl" TEXT NULL,
+                "SourceName" TEXT NULL,
+                "SourceUrl" TEXT NULL,
+                "ConfidenceScore" INTEGER NOT NULL,
+                "MatchReason" TEXT NOT NULL,
+                "Status" TEXT NOT NULL,
+                "CreatedAt" TEXT NOT NULL,
+                "ReviewedAt" TEXT NULL,
+                CONSTRAINT "FK_SupplierMatchCandidates_Suppliers_SupplierId" FOREIGN KEY ("SupplierId") REFERENCES "Suppliers" ("Id") ON DELETE CASCADE
+            );
+            """,
+            cancellationToken);
+
+        await db.Database.ExecuteSqlRawAsync(
             """CREATE INDEX IF NOT EXISTS "IX_ResearchSources_SupplierId" ON "ResearchSources" ("SupplierId");""",
             cancellationToken);
         await db.Database.ExecuteSqlRawAsync(
@@ -71,6 +91,9 @@ public static class SqliteSchemaInitializer
             cancellationToken);
         await db.Database.ExecuteSqlRawAsync(
             """CREATE INDEX IF NOT EXISTS "IX_SupplierFacts_ResearchSourceId" ON "SupplierFacts" ("ResearchSourceId");""",
+            cancellationToken);
+        await db.Database.ExecuteSqlRawAsync(
+            """CREATE INDEX IF NOT EXISTS "IX_SupplierMatchCandidates_SupplierId" ON "SupplierMatchCandidates" ("SupplierId");""",
             cancellationToken);
     }
 }

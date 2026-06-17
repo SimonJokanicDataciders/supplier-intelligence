@@ -6,11 +6,11 @@ The app combines an ASP.NET Core Web API, EF Core, SQLite, a React frontend, and
 
 ## What It Does
 
-- Creates supplier profiles with country, industry, website, registry, VAT, and certification hints.
+- Creates supplier profiles with name, country, industry, and optional website.
 - Runs automated supplier analysis in the background.
 - Checks public evidence sources and supplier websites.
 - Extracts structured supplier facts from available evidence.
-- Generates supplier risk summaries with a local model or optional OpenRouter.
+- Generates supplier risk summaries with OpenRouter.
 - Shows evidence, missing facts, analysis history, and supplier facts in a compact UI.
 
 ## Tech Stack
@@ -19,8 +19,7 @@ The app combines an ASP.NET Core Web API, EF Core, SQLite, a React frontend, and
 - Entity Framework Core
 - SQLite for local development
 - React and Vite
-- Ollama for local model usage
-- Optional OpenRouter web search for broader supplier discovery
+- OpenRouter for model generation and optional web search
 
 ## Learning Map
 
@@ -55,7 +54,7 @@ Open:
 http://127.0.0.1:5174
 ```
 
-## Optional OpenRouter Setup
+## OpenRouter Setup
 
 Use environment variables. Do not commit API keys.
 
