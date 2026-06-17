@@ -1,0 +1,23 @@
+{
+  "title": "Adaptive analyser progress",
+  "runs": [
+    {
+      "name": "Before",
+      "identity": 35,
+      "sources": 25,
+      "products": 30,
+      "certifications": 15,
+      "noiseControl": 25,
+      "groundedness": 30
+    },
+    {
+      "name": "Adaptive v1",
+      "identity": 75,
+      "sources": 70,
+      "products": 65,
+      "certifications": 45,
+      "noiseControl": 70,
+      "groundedness": 65
+    }
+  ]
+}

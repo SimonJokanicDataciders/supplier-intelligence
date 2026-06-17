@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using SupplierIntelligence.Api.Data;
@@ -7,11 +8,13 @@ using SupplierIntelligence.Api.Options;
 
 namespace SupplierIntelligence.Api.Services;
 
-public sealed class SupplierAnalysisWorker(
+public sealed class AdaptiveSupplierAnalysisWorker(
     IServiceScopeFactory scopeFactory,
     ISupplierAnalysisQueue queue,
-    ILogger<SupplierAnalysisWorker> logger) : BackgroundService
+    ILogger<AdaptiveSupplierAnalysisWorker> logger) : BackgroundService
 {
+    private static readonly Regex UrlRegex = new("https?://[^\\s<>()\\[\\]\"']+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await Task.Yield();
@@ -60,6 +63,7 @@ public sealed class SupplierAnalysisWorker(
         var websiteCertificationDiscovery = scope.ServiceProvider.GetRequiredService<IWebsiteCertificationDiscovery>();
         var websiteResearcher = scope.ServiceProvider.GetRequiredService<IWebsiteResearcher>();
         var sourceDiscoveryPlanner = scope.ServiceProvider.GetRequiredService<ISourceDiscoveryPlanner>();
+        var supplierResearchQueryPlanner = scope.ServiceProvider.GetRequiredService<ISupplierResearchQueryPlanner>();
         var researchFactExtractor = scope.ServiceProvider.GetRequiredService<IResearchFactExtractor>();
         var localModel = scope.ServiceProvider.GetRequiredService<ILocalModelClient>();
         var localModelOptions = scope.ServiceProvider.GetRequiredService<IOptions<LocalModelOptions>>().Value;
@@ -96,6 +100,7 @@ public sealed class SupplierAnalysisWorker(
                 websiteCertificationDiscovery,
                 websiteResearcher,
                 sourceDiscoveryPlanner,
+                supplierResearchQueryPlanner,
                 researchFactExtractor,
                 localModel,
                 localModelOptions,
@@ -123,6 +128,7 @@ public sealed class SupplierAnalysisWorker(
         IWebsiteCertificationDiscovery websiteCertificationDiscovery,
         IWebsiteResearcher websiteResearcher,
         ISourceDiscoveryPlanner sourceDiscoveryPlanner,
+        ISupplierResearchQueryPlanner supplierResearchQueryPlanner,
         IResearchFactExtractor researchFactExtractor,
         ILocalModelClient localModel,
         LocalModelOptions localModelOptions,
@@ -169,6 +175,7 @@ public sealed class SupplierAnalysisWorker(
         await RunAiCompanyWebSearchAsync(
             job,
             supplier,
+            supplierResearchQueryPlanner,
             localModel,
             localModelOptions,
             db,
@@ -265,6 +272,7 @@ public sealed class SupplierAnalysisWorker(
     private static async Task RunAiCompanyWebSearchAsync(
         AnalysisJob job,
         Supplier supplier,
+        ISupplierResearchQueryPlanner supplierResearchQueryPlanner,
         ILocalModelClient localModel,
         LocalModelOptions localModelOptions,
         AppDbContext db,
@@ -273,51 +281,60 @@ public sealed class SupplierAnalysisWorker(
         if (!localModel.Provider.Equals("OpenRouter", StringComparison.OrdinalIgnoreCase) ||
             !localModelOptions.EnableWebSearch ||
             supplier.SourceChecks.Any(source =>
-                source.SourceName.Equals("AI web search research", StringComparison.OrdinalIgnoreCase)))
+                source.SourceName.StartsWith("AI web search:", StringComparison.OrdinalIgnoreCase)))
         {
             return;
         }
 
         var reachableSources = supplier.SourceChecks.Count(source => source.Status == SourceCheckStatus.Reachable);
-        if (!string.IsNullOrWhiteSpace(supplier.WebsiteUrl) && reachableSources >= 4)
+        if (!string.IsNullOrWhiteSpace(supplier.WebsiteUrl) && reachableSources >= 8)
         {
             return;
         }
 
-        job.ProgressMessage = "Searching the web for supplier identity and public evidence.";
+        var queries = supplierResearchQueryPlanner.PlanQueries(supplier);
+        if (queries.Count == 0)
+        {
+            return;
+        }
+
+        job.ProgressMessage = $"Running {queries.Count} adaptive supplier web search{(queries.Count == 1 ? string.Empty : "es")}.";
         await db.SaveChangesAsync(cancellationToken);
 
-        try
+        foreach (var query in queries)
         {
-            var research = await localModel.ChatAsync(
-                localModel.DefaultModel,
-                BuildCompanyWebSearchSystemPrompt(),
-                BuildCompanyWebSearchUserPrompt(supplier),
-                cancellationToken);
-
-            supplier.SourceChecks.Add(new SourceCheck
+            try
             {
-                SupplierId = supplier.Id,
-                SourceName = "AI web search research",
-                Url = "https://openrouter.ai/search",
-                Status = SourceCheckStatus.Reachable,
-                Notes = $"OpenRouter web search summary. Text: {TrimForSourceNotes(research)}"
-            });
+                var research = await localModel.ChatAsync(
+                    localModel.DefaultModel,
+                    BuildCompanyWebSearchSystemPrompt(),
+                    BuildCompanyWebSearchUserPrompt(supplier, query),
+                    cancellationToken);
 
-            await db.SaveChangesAsync(cancellationToken);
-        }
-        catch (LocalModelException exception)
-        {
-            supplier.SourceChecks.Add(new SourceCheck
+                supplier.SourceChecks.Add(new SourceCheck
+                {
+                    SupplierId = supplier.Id,
+                    SourceName = $"AI web search: {query.Label}",
+                    Url = ExtractPrimarySourceUrl(research),
+                    Status = IsUsefulAiResearch(research) ? SourceCheckStatus.Reachable : SourceCheckStatus.Failed,
+                    Notes = BuildAiResearchNotes(query, research)
+                });
+
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            catch (LocalModelException exception)
             {
-                SupplierId = supplier.Id,
-                SourceName = "AI web search research",
-                Url = "https://openrouter.ai/search",
-                Status = SourceCheckStatus.Failed,
-                Notes = exception.Message
-            });
+                supplier.SourceChecks.Add(new SourceCheck
+                {
+                    SupplierId = supplier.Id,
+                    SourceName = $"AI web search: {query.Label}",
+                    Url = string.Empty,
+                    Status = SourceCheckStatus.Failed,
+                    Notes = $"{query.Goal} Query: {query.Query}. {exception.Message}"
+                });
 
-            await db.SaveChangesAsync(cancellationToken);
+                await db.SaveChangesAsync(cancellationToken);
+            }
         }
     }
 
@@ -435,18 +452,26 @@ public sealed class SupplierAnalysisWorker(
     {
         return """
             You are a supplier research assistant with web search.
-            Use web search to identify the most likely public company profile for the supplier.
+            Use web search for the focused supplier research task.
             Do not rely on Wikipedia or Wikidata.
-            Choose search targets dynamically from the supplier country, industry, and name.
             Prefer source types that fit the supplier: manufacturer directories, marketplaces, official pages, local company profiles, customs/trade databases, certification pages, import/export directories, country-specific business registries, and industry portals.
             If several companies have similar names, compare them and say which one best matches the requested country and industry.
-            Return concise evidence only. Do not mention search mechanics.
-            Include source names and URLs in plain text.
+            Return concise evidence only. Do not mention browser navigation, menus, or search mechanics.
+            Include source names and URLs in plain text when available.
             Do not invent certifications; mark them as claims unless the source is a certification registry or certificate document.
+            Do not fill gaps from memory. If a source does not prove a fact, say the fact is not confirmed.
+            Use this exact structure:
+            Company identity:
+            Products and services:
+            Certification and quality evidence:
+            Location or registry evidence:
+            Source URLs:
             """;
     }
 
-    private static string BuildCompanyWebSearchUserPrompt(Supplier supplier)
+    private static string BuildCompanyWebSearchUserPrompt(
+        Supplier supplier,
+        SupplierResearchQuery query)
     {
         var website = string.IsNullOrWhiteSpace(supplier.WebsiteUrl)
             ? "not provided"
@@ -471,6 +496,12 @@ public sealed class SupplierAnalysisWorker(
             VAT number: {vatNumber}
             Certification hints: {certificationHints}
 
+            Focused research goal:
+            {query.Goal}
+
+            Suggested search query:
+            {query.Query}
+
             Find:
             - likely company identity and what it sells or manufactures
             - likely website or public profile pages
@@ -479,8 +510,35 @@ public sealed class SupplierAnalysisWorker(
             - certification or quality-system claims, only if sources mention them
             - source URLs used
 
-            Keep output under 900 words.
+            Keep output under 350 words.
             """;
+    }
+
+    private static bool IsUsefulAiResearch(string research)
+    {
+        var normalized = research.Trim();
+        return normalized.Length >= 120 &&
+            !normalized.Contains("could not find", StringComparison.OrdinalIgnoreCase) &&
+            !normalized.Contains("no relevant", StringComparison.OrdinalIgnoreCase) &&
+            !normalized.Contains("not enough information", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string BuildAiResearchNotes(
+        SupplierResearchQuery query,
+        string research)
+    {
+        return TrimForSourceNotes(
+            $"Research goal: {query.Goal} Query: {query.Query}. Text: {research}");
+    }
+
+    private static string ExtractPrimarySourceUrl(string research)
+    {
+        return UrlRegex
+            .Matches(research)
+            .Select(match => match.Value.TrimEnd('.', ',', ')', ']', '"', '\''))
+            .Where(url => !url.Contains("openrouter.ai", StringComparison.OrdinalIgnoreCase))
+            .FirstOrDefault(url => Uri.TryCreate(url, UriKind.Absolute, out _)) ??
+            "https://openrouter.ai/search";
     }
 
     private static string TrimForSourceNotes(string value)

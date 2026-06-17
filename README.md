@@ -91,3 +91,7 @@ This is a learning/demo application, not a production supplier-risk system.
 
 ![Dashboard](docs/images/dashboard.png)
 ![Supplier analysis](docs/images/analysis-result.png)
+
+## Analyser Quality
+
+![Analyser quality](docs/images/analyser-quality.png)

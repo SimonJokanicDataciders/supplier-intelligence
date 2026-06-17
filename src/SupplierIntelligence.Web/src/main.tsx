@@ -878,18 +878,109 @@ function CompactSourceCheckList({ sourceChecks }: { sourceChecks: SourceCheck[] 
 
   return (
     <div className="compact-list">
-      {sourceChecks.map((sourceCheck) => (
-        <article className="evidence-item" key={sourceCheck.id}>
-          <strong>{sourceCheck.sourceName}</strong>
-          <span>{formatSourceStatus(sourceCheck.status)}</span>
-          <a href={sourceCheck.url} rel="noreferrer" target="_blank">
-            {sourceCheck.url}
-          </a>
-          <p>{sourceCheck.notes || 'No notes'}</p>
-        </article>
-      ))}
+      {[...sourceChecks]
+        .sort(compareSourceChecks)
+        .map((sourceCheck) => {
+          const quality = scoreSourceCheck(sourceCheck)
+
+          return (
+            <article className="evidence-item" key={sourceCheck.id}>
+              <div className="evidence-title-row">
+                <strong>{sourceCheck.sourceName}</strong>
+                <span className={`source-quality source-quality-${quality.level.toLowerCase()}`}>
+                  {quality.level} · {quality.score}/100
+                </span>
+              </div>
+              <div className="source-meta-row">
+                <span>{formatSourceStatus(sourceCheck.status)}</span>
+                <span>{formatSourceKind(sourceCheck)}</span>
+              </div>
+              <a href={sourceCheck.url} rel="noreferrer" target="_blank">
+                {sourceCheck.url}
+              </a>
+              <p>{shortenText(sourceCheck.notes || 'No notes', 420)}</p>
+              <div className="source-card-actions">
+                <a className="source-open-link" href={sourceCheck.url} rel="noreferrer" target="_blank">
+                  Open source
+                </a>
+              </div>
+            </article>
+          )
+        })}
     </div>
   )
+}
+
+function compareSourceChecks(a: SourceCheck, b: SourceCheck) {
+  return scoreSourceCheck(b).score - scoreSourceCheck(a).score ||
+    Date.parse(b.checkedAt) - Date.parse(a.checkedAt)
+}
+
+function scoreSourceCheck(sourceCheck: SourceCheck) {
+  let score = 15
+  const name = sourceCheck.sourceName.toLowerCase()
+  const notes = sourceCheck.notes.toLowerCase()
+  const url = sourceCheck.url.toLowerCase()
+
+  if (sourceCheck.status === 'Reachable') {
+    score += 25
+  }
+
+  if (name.includes('supplier website') || name.includes('website research')) {
+    score += 18
+  }
+
+  if (name.includes('ai web search')) {
+    score += url.includes('openrouter.ai') ? 10 : 18
+  }
+
+  if (name.includes('registry') || name.includes('vat') || name.includes('vies')) {
+    score += 22
+  }
+
+  if (notes.includes('source urls:') || notes.includes('http')) {
+    score += 10
+  }
+
+  if (notes.includes('certificate') || notes.includes('iso ') || notes.includes('iatf') || notes.includes('as9100')) {
+    score += 8
+  }
+
+  if (sourceCheck.status === 'Blocked' || sourceCheck.status === 'Failed') {
+    score -= 25
+  }
+
+  if (url.includes('openrouter.ai/search')) {
+    score -= 12
+  }
+
+  const boundedScore = Math.max(0, Math.min(100, score))
+  const level = boundedScore >= 70 ? 'High' : boundedScore >= 40 ? 'Medium' : 'Low'
+
+  return { level, score: boundedScore }
+}
+
+function formatSourceKind(sourceCheck: SourceCheck) {
+  const sourceName = sourceCheck.sourceName.toLowerCase()
+  const url = sourceCheck.url.toLowerCase()
+
+  if (sourceName.includes('registry') || sourceName.includes('vat') || sourceName.includes('vies')) {
+    return 'registry'
+  }
+
+  if (sourceName.includes('supplier website') || sourceName.includes('website research')) {
+    return 'own website'
+  }
+
+  if (sourceName.includes('ai web search')) {
+    return url.includes('openrouter.ai') ? 'search summary' : 'external source'
+  }
+
+  if (sourceName.includes('cert')) {
+    return 'certification'
+  }
+
+  return 'public source'
 }
 
 function readError(exception: unknown) {

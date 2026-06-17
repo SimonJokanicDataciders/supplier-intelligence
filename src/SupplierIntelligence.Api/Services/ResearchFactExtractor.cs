@@ -333,6 +333,11 @@ public sealed partial class ResearchFactExtractor : IResearchFactExtractor
             return ResearchSourceKind.CompanyRegistry;
         }
 
+        if (sourceName.Contains("AI web search", StringComparison.OrdinalIgnoreCase))
+        {
+            return ResearchSourceKind.ExternalKnowledge;
+        }
+
         if (sourceName.Contains("VAT", StringComparison.OrdinalIgnoreCase) ||
             sourceName.Contains("VIES", StringComparison.OrdinalIgnoreCase))
         {
@@ -355,10 +360,24 @@ public sealed partial class ResearchFactExtractor : IResearchFactExtractor
 
     private static FactConfidence EstimateConfidence(string sourceName, string snippet)
     {
-        if (sourceName.Contains("Wikipedia summary", StringComparison.OrdinalIgnoreCase) ||
-            sourceName.Contains("registry", StringComparison.OrdinalIgnoreCase))
+        if (sourceName.Contains("registry", StringComparison.OrdinalIgnoreCase) &&
+            !sourceName.Contains("search", StringComparison.OrdinalIgnoreCase))
         {
             return FactConfidence.High;
+        }
+
+        if (sourceName.Contains("AI web search", StringComparison.OrdinalIgnoreCase))
+        {
+            return snippet.Contains("Source URLs:", StringComparison.OrdinalIgnoreCase) ||
+                snippet.Contains("http", StringComparison.OrdinalIgnoreCase)
+                    ? FactConfidence.Medium
+                    : FactConfidence.Low;
+        }
+
+        if (sourceName.Contains("supplier website", StringComparison.OrdinalIgnoreCase) ||
+            sourceName.Contains("website research", StringComparison.OrdinalIgnoreCase))
+        {
+            return FactConfidence.Medium;
         }
 
         if (snippet.Contains("manufactures", StringComparison.OrdinalIgnoreCase) ||
@@ -417,8 +436,11 @@ public sealed partial class ResearchFactExtractor : IResearchFactExtractor
             !normalized.Contains("HAProxy Challenge", StringComparison.OrdinalIgnoreCase) &&
             !normalized.Contains("DuckDuckGo All Regions", StringComparison.OrdinalIgnoreCase) &&
             !normalized.Contains("Jump to content", StringComparison.OrdinalIgnoreCase) &&
+            !normalized.Contains("Skip to content", StringComparison.OrdinalIgnoreCase) &&
             !normalized.Contains("Main menu", StringComparison.OrdinalIgnoreCase) &&
-            !normalized.Contains("Move to sidebar", StringComparison.OrdinalIgnoreCase);
+            !normalized.Contains("Move to sidebar", StringComparison.OrdinalIgnoreCase) &&
+            !normalized.Contains("all rights reserved", StringComparison.OrdinalIgnoreCase) &&
+            !normalized.Contains("cookie policy", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool LooksLikeCompanyDescription(string sourceName, string snippet)

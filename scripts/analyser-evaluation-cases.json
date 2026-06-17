@@ -1,0 +1,113 @@
+[
+  {
+    "name": "Atlas Components Demo",
+    "countryCode": "DE",
+    "industry": "Precision machined components",
+    "websiteUrl": "https://supplier.example",
+    "expected": [
+      "company profile should explain what the supplier does",
+      "website evidence should not be treated as certification verification",
+      "missing registry evidence should be visible"
+    ]
+  },
+  {
+    "name": "Nordic Bearings Demo",
+    "countryCode": "SE",
+    "industry": "Bearings and industrial manufacturing",
+    "websiteUrl": "",
+    "expected": [
+      "adaptive search should try identity, products, quality, market profile, and external evidence",
+      "analysis should not default to Wikipedia",
+      "facts should stay draft until sources are confirmed"
+    ]
+  },
+  {
+    "name": "Yabang Trade",
+    "countryCode": "CN",
+    "industry": "Peptides",
+    "websiteUrl": "",
+    "expected": [
+      "search should look for marketplace and trade-directory profiles",
+      "analysis should compare similarly named suppliers",
+      "products should be extracted only when source text supports them"
+    ]
+  },
+  {
+    "name": "Kijani Industrial Supplies",
+    "countryCode": "KE",
+    "industry": "Industrial maintenance supplies",
+    "websiteUrl": "",
+    "expected": [
+      "search should not depend on Wikipedia or European registries",
+      "country and industry fit should be part of identity confidence",
+      "missing certification evidence should remain explicit"
+    ]
+  },
+  {
+    "name": "Northstar Plastics",
+    "countryCode": "US",
+    "industry": "Injection molded plastic parts",
+    "websiteUrl": "https://supplier.example",
+    "certificationHints": "ISO 9001",
+    "expected": [
+      "certification hints should trigger a focused quality search",
+      "ISO 9001 should remain a claim unless a certificate or authority source confirms it",
+      "risk summary should separate company profile from certification gaps"
+    ]
+  },
+  {
+    "name": "Wrong Website Fixture",
+    "countryCode": "AT",
+    "industry": "Metal fabrication",
+    "websiteUrl": "https://example.com",
+    "expected": [
+      "analysis should avoid trusting unrelated generic website text",
+      "external search should try to recover supplier identity",
+      "evidence strength should remain sparse if no matching sources are found"
+    ]
+  },
+  {
+    "name": "Registry Number Fixture",
+    "countryCode": "AT",
+    "industry": "Machine parts",
+    "registryNumber": "FN123456x",
+    "expected": [
+      "registry query should only run because an identifier was provided",
+      "registry evidence should be high confidence only when the source is reachable and supplier-specific",
+      "failed registry pages should not become validated facts"
+    ]
+  },
+  {
+    "name": "VAT Fixture",
+    "countryCode": "DE",
+    "industry": "Electronics distribution",
+    "vatNumber": "DE123456789",
+    "expected": [
+      "tax identifier query should only run because VAT was provided",
+      "VAT evidence should be shown separately from product evidence",
+      "risk decision should stay draft if VAT cannot be verified"
+    ]
+  },
+  {
+    "name": "Fake Supplier Fixture",
+    "countryCode": "GB",
+    "industry": "Aerospace fasteners",
+    "websiteUrl": "",
+    "expected": [
+      "analysis should say evidence is not confirmed when search fails",
+      "it should not invent AS9100 or ISO certifications",
+      "recommended next checks should ask for registry or certificate evidence"
+    ]
+  },
+  {
+    "name": "Duplicate Name Fixture",
+    "countryCode": "IT",
+    "industry": "Textile machinery",
+    "websiteUrl": "",
+    "expected": [
+      "analysis should compare similar company names",
+      "country and industry mismatch should lower confidence",
+      "source facts should not merge unrelated suppliers"
+    ]
+  }
+]

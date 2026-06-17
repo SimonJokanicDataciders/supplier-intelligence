@@ -50,12 +50,13 @@ builder.Services.AddHttpClient<IWebsiteResearcher, HttpWebsiteResearcher>(client
     client.Timeout = TimeSpan.FromSeconds(12);
 });
 builder.Services.AddSingleton<ISourceDiscoveryPlanner, SourceDiscoveryPlanner>();
+builder.Services.AddSingleton<ISupplierResearchQueryPlanner, SupplierResearchQueryPlanner>();
 builder.Services.AddSingleton<IResearchFactExtractor, ResearchFactExtractor>();
 builder.Services.AddSingleton<ICertificationVerificationConnector, LocalLearningRegistryCertificationConnector>();
 builder.Services.AddSingleton<ICertificationVerificationConnector, RuleBasedCertificationFallbackConnector>();
 builder.Services.AddSingleton<ICertificationVerifier, CompositeCertificationVerifier>();
 builder.Services.AddSingleton<ISupplierAnalysisQueue, ChannelSupplierAnalysisQueue>();
-builder.Services.AddHostedService<SupplierAnalysisWorker>();
+builder.Services.AddHostedService<AdaptiveSupplierAnalysisWorker>();
 
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
