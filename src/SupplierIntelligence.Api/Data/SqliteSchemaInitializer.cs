@@ -81,6 +81,31 @@ public static class SqliteSchemaInitializer
             cancellationToken);
 
         await db.Database.ExecuteSqlRawAsync(
+            """
+            CREATE TABLE IF NOT EXISTS "CompareBoards" (
+                "Id" INTEGER NOT NULL CONSTRAINT "PK_CompareBoards" PRIMARY KEY AUTOINCREMENT,
+                "Name" TEXT NOT NULL,
+                "CreatedAt" TEXT NOT NULL,
+                "UpdatedAt" TEXT NOT NULL
+            );
+            """,
+            cancellationToken);
+
+        await db.Database.ExecuteSqlRawAsync(
+            """
+            CREATE TABLE IF NOT EXISTS "CompareBoardSuppliers" (
+                "Id" INTEGER NOT NULL CONSTRAINT "PK_CompareBoardSuppliers" PRIMARY KEY AUTOINCREMENT,
+                "CompareBoardId" INTEGER NOT NULL,
+                "SupplierId" INTEGER NOT NULL,
+                "SortOrder" INTEGER NOT NULL,
+                "AddedAt" TEXT NOT NULL,
+                CONSTRAINT "FK_CompareBoardSuppliers_CompareBoards_CompareBoardId" FOREIGN KEY ("CompareBoardId") REFERENCES "CompareBoards" ("Id") ON DELETE CASCADE,
+                CONSTRAINT "FK_CompareBoardSuppliers_Suppliers_SupplierId" FOREIGN KEY ("SupplierId") REFERENCES "Suppliers" ("Id") ON DELETE CASCADE
+            );
+            """,
+            cancellationToken);
+
+        await db.Database.ExecuteSqlRawAsync(
             """CREATE INDEX IF NOT EXISTS "IX_ResearchSources_SupplierId" ON "ResearchSources" ("SupplierId");""",
             cancellationToken);
         await db.Database.ExecuteSqlRawAsync(
@@ -94,6 +119,15 @@ public static class SqliteSchemaInitializer
             cancellationToken);
         await db.Database.ExecuteSqlRawAsync(
             """CREATE INDEX IF NOT EXISTS "IX_SupplierMatchCandidates_SupplierId" ON "SupplierMatchCandidates" ("SupplierId");""",
+            cancellationToken);
+        await db.Database.ExecuteSqlRawAsync(
+            """CREATE INDEX IF NOT EXISTS "IX_CompareBoardSuppliers_CompareBoardId" ON "CompareBoardSuppliers" ("CompareBoardId");""",
+            cancellationToken);
+        await db.Database.ExecuteSqlRawAsync(
+            """CREATE INDEX IF NOT EXISTS "IX_CompareBoardSuppliers_SupplierId" ON "CompareBoardSuppliers" ("SupplierId");""",
+            cancellationToken);
+        await db.Database.ExecuteSqlRawAsync(
+            """CREATE UNIQUE INDEX IF NOT EXISTS "IX_CompareBoardSuppliers_CompareBoardId_SupplierId" ON "CompareBoardSuppliers" ("CompareBoardId", "SupplierId");""",
             cancellationToken);
     }
 }

@@ -43,6 +43,15 @@ public sealed class OllamaLocalModelClient(
         }
     }
 
+    public async Task ValidateAsync(CancellationToken cancellationToken)
+    {
+        _ = await ChatAsync(
+            DefaultModel,
+            "You validate the local model runtime.",
+            "Reply with OK only.",
+            cancellationToken);
+    }
+
     public async Task<string> ChatAsync(
         string model,
         string systemPrompt,

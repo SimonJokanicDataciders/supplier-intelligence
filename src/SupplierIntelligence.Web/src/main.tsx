@@ -1,11 +1,17 @@
 import { StrictMode, useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
+  addSupplierToCompareBoard,
   archiveSupplier,
   clearOpenRouterApiKey,
+  compareSuppliers,
   confirmSupplierMatchCandidate,
+  createCompareBoard,
   createSupplier,
+  deleteCompareBoard,
   deleteSourceCheck,
+  exportSupplierReportMarkdown,
+  getCompareBoards,
   getSupplierAnalytics,
   getSupplierAnalysisJob,
   getSupplierAnalysisJobs,
@@ -18,12 +24,15 @@ import {
   queueSupplierAnalysis,
   recheckOpenQuestions,
   rejectSupplierMatchCandidate,
+  removeSupplierFromCompareBoard,
+  renameCompareBoard,
   researchWebsiteSource,
   saveOpenRouterApiKey,
   suggestSupplierMatchCandidates,
   updateSourceCheck,
   updateSupplierIndustry,
   addSourceCheck,
+  type CompareBoard,
   type ReviewStepName,
   type AnalysisJob,
   type CreateSupplierInput,
@@ -33,6 +42,8 @@ import {
   type SourceCheck,
   type SourceCheckInput,
   type SourceMixItem,
+  type SupplierComparison,
+  type SupplierComparisonItem,
   type SupplierFact,
   type OpenQuestionResolution,
   type SupplierAnalytics,
@@ -66,6 +77,9 @@ function App() {
   const [reviewSummary, setReviewSummary] = useState<SupplierReviewSummary | null>(null)
   const [supplierAnalytics, setSupplierAnalytics] = useState<SupplierAnalytics | null>(null)
   const [supplierConnections, setSupplierConnections] = useState<SupplierConnection[]>([])
+  const [supplierComparison, setSupplierComparison] = useState<SupplierComparison | null>(null)
+  const [compareBoards, setCompareBoards] = useState<CompareBoard[]>([])
+  const [activeCompareBoardId, setActiveCompareBoardId] = useState<number | null>(null)
   const [matchCandidates, setMatchCandidates] = useState<SupplierMatchCandidate[]>([])
   const [supplierForm, setSupplierForm] = useState<CreateSupplierInput>(emptySupplierForm)
   const [sourceForm, setSourceForm] = useState<SourceFormState>({
@@ -75,6 +89,7 @@ function App() {
     notes: '',
   })
   const [websiteResearchUrl, setWebsiteResearchUrl] = useState('')
+  const [boardNameDraft, setBoardNameDraft] = useState('')
   const [editingSourceId, setEditingSourceId] = useState<number | null>(null)
   const [sourceMessage, setSourceMessage] = useState<string | null>(null)
   const [resolvedOpenQuestions, setResolvedOpenQuestions] = useState<string[]>([])
@@ -87,17 +102,21 @@ function App() {
   const [dragOverIndustry, setDragOverIndustry] = useState<string | null>(null)
   const [rankTargetIndustry, setRankTargetIndustry] = useState<string | null>(null)
   const [folderOrder, setFolderOrder] = useState<string[]>(() => readStoredFolderOrder())
+  const [selectedCompareSupplierIds, setSelectedCompareSupplierIds] = useState<number[]>([])
   const [loading, setLoading] = useState(true)
   const [checkingLocalModel, setCheckingLocalModel] = useState(false)
   const [savingOpenRouterKey, setSavingOpenRouterKey] = useState(false)
   const [creatingSupplier, setCreatingSupplier] = useState(false)
   const [archivingSupplier, setArchivingSupplier] = useState(false)
   const [queueingAnalysis, setQueueingAnalysis] = useState(false)
+  const [exportingReport, setExportingReport] = useState(false)
   const [savingSource, setSavingSource] = useState(false)
   const [researchingWebsite, setResearchingWebsite] = useState(false)
   const [recheckingOpenQuestions, setRecheckingOpenQuestions] = useState(false)
   const [deletingSourceId, setDeletingSourceId] = useState<number | null>(null)
   const [loadingMatchCandidates, setLoadingMatchCandidates] = useState(false)
+  const [loadingComparison, setLoadingComparison] = useState(false)
+  const [savingBoard, setSavingBoard] = useState(false)
   const [reviewingMatchCandidateId, setReviewingMatchCandidateId] = useState<number | null>(null)
   const [activeReviewStep, setActiveReviewStep] = useState<ReviewStep>('briefing')
   const [error, setError] = useState<string | null>(null)
@@ -106,11 +125,22 @@ function App() {
     () => groupSuppliersByIndustry(visibleSuppliers, folderOrder),
     [visibleSuppliers, folderOrder],
   )
+  const activeCompareBoard = compareBoards.find((board) => board.id === activeCompareBoardId) ?? null
 
   useEffect(() => {
     void loadSuppliers()
     void loadLocalModelStatus()
+    void loadCompareBoards()
   }, [])
+
+  useEffect(() => {
+    const visibleIds = new Set(visibleSuppliers.map((item) => item.id))
+    setSelectedCompareSupplierIds((current) => current.filter((id) => visibleIds.has(id)))
+  }, [visibleSuppliers])
+
+  useEffect(() => {
+    setBoardNameDraft(activeCompareBoard?.name ?? '')
+  }, [activeCompareBoard])
 
   useEffect(() => {
     if (selectedSupplierId === null) {
@@ -241,6 +271,209 @@ function App() {
       if (!quiet) {
         setLoadingMatchCandidates(false)
       }
+    }
+  }
+
+  async function loadCompareBoards() {
+    setError(null)
+
+    try {
+      setCompareBoards(await getCompareBoards())
+    } catch (exception) {
+      setError(readError(exception))
+    }
+  }
+
+  function openSupplierResearch(id: number) {
+    setSupplierComparison(null)
+    setActiveCompareBoardId(null)
+    setSelectedSupplierId(id)
+  }
+
+  async function selectSupplier(id: number) {
+    if (activeCompareBoardId !== null) {
+      await addSupplierToActiveBoard(id)
+      return
+    }
+
+    openSupplierResearch(id)
+  }
+
+  function openCompareBoard(boardId: number) {
+    setSupplierComparison(null)
+    setActiveCompareBoardId(boardId)
+  }
+
+  function toggleCompareSupplier(id: number, checked: boolean) {
+    setSupplierComparison(null)
+    setSelectedCompareSupplierIds((current) => {
+      if (!checked) {
+        return current.filter((supplierId) => supplierId !== id)
+      }
+
+      if (current.includes(id) || current.length >= 4) {
+        return current
+      }
+
+      return [...current, id]
+    })
+  }
+
+  async function openSupplierComparison() {
+    if (selectedCompareSupplierIds.length < 2) {
+      setError('Select at least 2 suppliers to compare.')
+      return
+    }
+
+    setLoadingComparison(true)
+    setError(null)
+
+    try {
+      setSupplierComparison(await compareSuppliers(selectedCompareSupplierIds))
+      setActiveCompareBoardId(null)
+    } catch (exception) {
+      setError(readError(exception))
+    } finally {
+      setLoadingComparison(false)
+    }
+  }
+
+  function clearSupplierComparison() {
+    setSupplierComparison(null)
+    setActiveCompareBoardId(null)
+    setSelectedCompareSupplierIds([])
+  }
+
+  async function createBoardFromSelection() {
+    const supplierIds = selectedCompareSupplierIds.length > 0
+      ? selectedCompareSupplierIds
+      : selectedSupplierId === null
+        ? []
+        : [selectedSupplierId]
+
+    setSavingBoard(true)
+    setError(null)
+
+    try {
+      const createdBoard = await createCompareBoard(
+        buildDefaultBoardName(supplierIds, visibleSuppliers),
+        supplierIds,
+      )
+      setCompareBoards((current) => [createdBoard, ...current.filter((board) => board.id !== createdBoard.id)])
+      setActiveCompareBoardId(createdBoard.id)
+      setSupplierComparison(null)
+      setBoardNameDraft(createdBoard.name)
+    } catch (exception) {
+      setError(readError(exception))
+    } finally {
+      setSavingBoard(false)
+    }
+  }
+
+  async function renameActiveBoard() {
+    if (activeCompareBoard === null || boardNameDraft.trim().length === 0) {
+      return
+    }
+
+    setSavingBoard(true)
+    setError(null)
+
+    try {
+      const updatedBoard = await renameCompareBoard(activeCompareBoard.id, boardNameDraft)
+      setCompareBoards((current) => current.map((board) => board.id === updatedBoard.id ? updatedBoard : board))
+    } catch (exception) {
+      setError(readError(exception))
+    } finally {
+      setSavingBoard(false)
+    }
+  }
+
+  async function deleteActiveBoard() {
+    if (activeCompareBoard === null) {
+      return
+    }
+
+    setSavingBoard(true)
+    setError(null)
+
+    try {
+      await deleteCompareBoard(activeCompareBoard.id)
+      setCompareBoards((current) => current.filter((board) => board.id !== activeCompareBoard.id))
+      setActiveCompareBoardId(null)
+    } catch (exception) {
+      setError(readError(exception))
+    } finally {
+      setSavingBoard(false)
+    }
+  }
+
+  async function addSelectedSuppliersToActiveBoard() {
+    if (activeCompareBoard === null) {
+      return
+    }
+
+    const existingIds = new Set(activeCompareBoard.suppliers.map((item) => item.supplierId))
+    const supplierIds = selectedCompareSupplierIds.filter((id) => !existingIds.has(id))
+    if (supplierIds.length === 0) {
+      setError('Select suppliers that are not already on this board.')
+      return
+    }
+
+    setSavingBoard(true)
+    setError(null)
+
+    try {
+      let updatedBoard = activeCompareBoard
+      for (const supplierId of supplierIds) {
+        updatedBoard = await addSupplierToCompareBoard(activeCompareBoard.id, supplierId)
+      }
+      setCompareBoards((current) => current.map((board) => board.id === updatedBoard.id ? updatedBoard : board))
+    } catch (exception) {
+      setError(readError(exception))
+    } finally {
+      setSavingBoard(false)
+    }
+  }
+
+  async function addSupplierToActiveBoard(supplierId: number) {
+    if (activeCompareBoard === null) {
+      return
+    }
+
+    if (activeCompareBoard.suppliers.some((item) => item.supplierId === supplierId)) {
+      setError('This supplier is already on the active board.')
+      return
+    }
+
+    setSavingBoard(true)
+    setError(null)
+
+    try {
+      const updatedBoard = await addSupplierToCompareBoard(activeCompareBoard.id, supplierId)
+      setCompareBoards((current) => current.map((board) => board.id === updatedBoard.id ? updatedBoard : board))
+      setSelectedCompareSupplierIds((current) => current.filter((id) => id !== supplierId))
+    } catch (exception) {
+      setError(readError(exception))
+    } finally {
+      setSavingBoard(false)
+    }
+  }
+
+  async function removeSupplierFromActiveBoard(supplierId: number) {
+    if (activeCompareBoard === null) {
+      return
+    }
+
+    setSavingBoard(true)
+    setError(null)
+
+    try {
+      const updatedBoard = await removeSupplierFromCompareBoard(activeCompareBoard.id, supplierId)
+      setCompareBoards((current) => current.map((board) => board.id === updatedBoard.id ? updatedBoard : board))
+    } catch (exception) {
+      setError(readError(exception))
+    } finally {
+      setSavingBoard(false)
     }
   }
 
@@ -601,6 +834,28 @@ function App() {
     }
   }
 
+  async function exportCurrentSupplierReport() {
+    if (supplier === null) {
+      return
+    }
+
+    setExportingReport(true)
+    setError(null)
+
+    try {
+      const markdown = await exportSupplierReportMarkdown(supplier.id)
+      downloadTextFile(
+        markdown,
+        `${buildDownloadSlug(supplier.name)}-supplier-report.md`,
+        'text/markdown;charset=utf-8',
+      )
+    } catch (exception) {
+      setError(readError(exception))
+    } finally {
+      setExportingReport(false)
+    }
+  }
+
   async function refreshAnalysisRun(supplierId: number, jobId: number) {
     setError(null)
 
@@ -705,9 +960,8 @@ function App() {
   const knownSupplierFacts = supplier ? buildKnownSupplierFacts(supplier.supplierFacts) : []
   const usefulResearchSources = supplier ? buildUsefulResearchSources(supplier.researchSources) : []
   const briefingFacts = supplier ? buildBriefingFacts(supplier, knownSupplierFacts, latestEvidenceSnapshot) : []
-  const visibleMatchCandidates = buildVisibleMatchCandidates(matchCandidates)
+  const researchTimeline = supplier ? buildResearchTimeline(supplier, matchCandidates) : []
   const confirmedIdentity = matchCandidates.find((candidate) => candidate.status === 'Confirmed') ?? null
-  const hasConfirmedIdentity = confirmedIdentity !== null
   const knownInformation = supplier
     ? buildKnownInformation({
         supplier,
@@ -717,17 +971,8 @@ function App() {
         reachableSourceCount,
       })
     : []
-  const nextAction = buildNextAction({
-    hasConfirmedIdentity,
-    loadingMatchCandidates,
-    matchCandidateCount: visibleMatchCandidates.length,
-    nextEvidenceCount: nextEvidenceItems.length,
-    latestAssessment,
-  })
   const displayKnownInformation = reviewSummary?.knownInformation ?? knownInformation
   const displayMissingInformation = reviewSummary?.missingInformation ?? nextEvidenceItems
-  const displayNextAction = reviewSummary?.nextAction ?? nextAction
-  const displayTrustSignals = reviewSummary?.trustSignals ?? null
   const openQuestionItems = buildOpenQuestionItems({
     displayMissingInformation,
     latestAssessment,
@@ -813,6 +1058,40 @@ function App() {
           {loading && <p className="muted">Loading suppliers...</p>}
           {!loading && visibleSuppliers.length === 0 && <p className="muted">No suppliers found.</p>}
           {folderMessage && <p className="folder-message">{folderMessage}</p>}
+          {visibleSuppliers.length > 0 && (
+            <section className="compare-tray">
+              <div>
+                <strong>Compare suppliers</strong>
+                <span>{selectedCompareSupplierIds.length}/4 selected</span>
+              </div>
+              <div className="compare-actions">
+                <button
+                  className="primary"
+                  disabled={loadingComparison || selectedCompareSupplierIds.length < 2}
+                  type="button"
+                  onClick={() => void openSupplierComparison()}
+                >
+                  {loadingComparison ? 'Comparing...' : 'Compare selected'}
+                </button>
+                <button
+                  className="ghost"
+                  disabled={savingBoard || selectedCompareSupplierIds.length === 0}
+                  type="button"
+                  onClick={() => void createBoardFromSelection()}
+                >
+                  {savingBoard ? 'Saving...' : 'Save board'}
+                </button>
+                <button
+                  className="ghost"
+                  disabled={loadingComparison || selectedCompareSupplierIds.length === 0}
+                  type="button"
+                  onClick={clearSupplierComparison}
+                >
+                  Clear
+                </button>
+              </div>
+            </section>
+          )}
           {supplierFolders.map((folder) => (
             <details
               className={[
@@ -860,25 +1139,48 @@ function App() {
                   setRankTargetIndustry(null)
                 }}
               >
-                {folder.suppliers.map((item) => (
-                  <button
-                    className={item.id === selectedSupplierId ? 'supplier-item active' : 'supplier-item'}
-                    draggable
-                    key={item.id}
-                    onDragStart={(event) => {
-                      event.dataTransfer.effectAllowed = 'move'
-                      event.dataTransfer.setData('application/x-supplier-id', String(item.id))
-                      event.dataTransfer.setData('application/x-supplier-industry', item.industry)
-                      event.dataTransfer.setData('text/plain', item.name)
-                    }}
-                    onClick={() => setSelectedSupplierId(item.id)}
-                    type="button"
-                  >
-                    <span>{item.name}</span>
-                    <small>{item.countryCode}</small>
-                    {item.websiteUrl && <small>{item.websiteUrl}</small>}
-                  </button>
-                ))}
+                {folder.suppliers.map((item) => {
+                  const isActiveBoardMember = activeCompareBoard?.suppliers.some((boardSupplier) => boardSupplier.supplierId === item.id) ?? false
+
+                  return (
+                    <div
+                      className={[
+                        'supplier-row',
+                        item.id === selectedSupplierId && supplierComparison === null && activeCompareBoardId === null ? 'active' : '',
+                        selectedCompareSupplierIds.includes(item.id) ? 'compare-selected' : '',
+                        isActiveBoardMember ? 'board-member' : '',
+                      ].filter(Boolean).join(' ')}
+                      draggable
+                      key={item.id}
+                      onDragStart={(event) => {
+                        event.dataTransfer.effectAllowed = 'move'
+                        event.dataTransfer.setData('application/x-supplier-id', String(item.id))
+                        event.dataTransfer.setData('application/x-supplier-industry', item.industry)
+                        event.dataTransfer.setData('text/plain', item.name)
+                      }}
+                    >
+                      <label className="compare-check" title="Add supplier to compare">
+                        <input
+                          checked={selectedCompareSupplierIds.includes(item.id)}
+                          disabled={!selectedCompareSupplierIds.includes(item.id) && selectedCompareSupplierIds.length >= 4}
+                          type="checkbox"
+                          onChange={(event) => toggleCompareSupplier(item.id, event.target.checked)}
+                        />
+                      </label>
+                      <button
+                        className="supplier-item"
+                        disabled={savingBoard && activeCompareBoardId !== null}
+                        onClick={() => void selectSupplier(item.id)}
+                        type="button"
+                      >
+                        <span>{item.name}</span>
+                        <small>{item.countryCode}</small>
+                        {isActiveBoardMember && <small>on active board</small>}
+                        {item.websiteUrl && <small>{item.websiteUrl}</small>}
+                      </button>
+                    </div>
+                  )
+                })}
               </div>
             </details>
           ))}
@@ -886,9 +1188,28 @@ function App() {
       </section>
 
       <section className="detail">
-        {error && <div className="error-banner">{error}</div>}
+        <div className="detail-content">
+          {error && <div className="error-banner">{error}</div>}
 
-        {supplier ? (
+          {activeCompareBoard ? (
+            <CompareBoardWorkspace
+              board={activeCompareBoard}
+              boardNameDraft={boardNameDraft}
+              savingBoard={savingBoard}
+              selectedCompareSupplierIds={selectedCompareSupplierIds}
+              onAddSelectedSuppliers={() => void addSelectedSuppliersToActiveBoard()}
+              onDeleteBoard={() => void deleteActiveBoard()}
+              onOpenSupplier={openSupplierResearch}
+              onRemoveSupplier={(supplierId) => void removeSupplierFromActiveBoard(supplierId)}
+              onRenameBoard={() => void renameActiveBoard()}
+              onUpdateBoardName={setBoardNameDraft}
+            />
+          ) : supplierComparison ? (
+            <SupplierCompareWorkspace
+              comparison={supplierComparison}
+              onOpenSupplier={openSupplierResearch}
+            />
+          ) : supplier ? (
           <>
             <div className="supplier-header">
               <div>
@@ -921,6 +1242,14 @@ function App() {
                 </button>
                 <button
                   className="ghost"
+                  disabled={exportingReport}
+                  onClick={() => void exportCurrentSupplierReport()}
+                  type="button"
+                >
+                  {exportingReport ? 'Exporting...' : 'Export report'}
+                </button>
+                <button
+                  className="ghost"
                   disabled={archivingSupplier}
                   onClick={archiveSelectedSupplier}
                   type="button"
@@ -929,43 +1258,6 @@ function App() {
                 </button>
               </div>
             </div>
-
-            <section className="review-overview">
-              <div className="next-action-card">
-                <div className="section-heading">
-                  <p>Research briefing</p>
-                  <span>{reviewSummary?.headline ?? nextAction.status}</span>
-                </div>
-                <h2>{displayNextAction.title}</h2>
-                <p>{displayNextAction.description}</p>
-                <button
-                  className="primary"
-                  disabled={loadingMatchCandidates}
-                  onClick={() => {
-                    setActiveReviewStep(displayNextAction.step)
-                  }}
-                  type="button"
-                >
-                  {loadingMatchCandidates ? 'Loading...' : displayNextAction.buttonLabel}
-                </button>
-              </div>
-
-              <section className="dashboard-card">
-                <div className="section-heading">
-                  <p>What the app found</p>
-                  <span>{displayTrustSignals?.evidence ?? `${reachableSourceCount} sources`}</span>
-                </div>
-                <KnownInformationList items={displayKnownInformation} />
-                {displayTrustSignals && (
-                  <div className="trust-signal-row">
-                    <StatusField label="Facts" value={displayTrustSignals.identity} />
-                    <StatusField label="Sources" value={displayTrustSignals.evidence} />
-                    <StatusField label="Source issues" value={displayTrustSignals.certifications} />
-                    <StatusField label="Company source" value={displayTrustSignals.risk} />
-                  </div>
-                )}
-              </section>
-            </section>
 
             <nav className="review-stepper" aria-label="Supplier review steps">
               <ReviewStepButton
@@ -999,13 +1291,15 @@ function App() {
             </nav>
 
             <section className="review-workspace">
-              {activeReviewStep === 'briefing' && (
-                <SupplierBriefingMemo
-                  displayKnownInformation={displayKnownInformation}
-                  latestEvidenceSnapshot={latestEvidenceSnapshot}
-                  openQuestionItems={openQuestionItems}
-                  supplier={supplier}
-                />
+	              {activeReviewStep === 'briefing' && (
+	                <>
+	                  <SupplierBriefingMemo
+	                    displayKnownInformation={displayKnownInformation}
+	                    latestEvidenceSnapshot={latestEvidenceSnapshot}
+                    openQuestionItems={openQuestionItems}
+                    supplier={supplier}
+                  />
+                </>
               )}
 
               {activeReviewStep === 'sources' && (
@@ -1316,20 +1610,47 @@ function App() {
               )}
             </section>
 
-            {activeAnalysisJob && (
-              <AnalysisRunPanel
-                analytics={supplierAnalytics}
-                job={activeAnalysisJob}
-                matchCandidates={matchCandidates}
-                supplier={supplier}
-                latestAssessment={latestAssessment}
-              />
+            {(activeAnalysisJob || researchTimeline.length > 0) && (
+              <details className="secondary-details research-activity-details">
+                <summary>
+                  <span>Research activity</span>
+                  <small>
+                    {activeAnalysisJob
+                      ? `${activeAnalysisJob.status} · ${researchTimeline.length} events`
+                      : `${researchTimeline.length} events`}
+                  </small>
+                </summary>
+                {activeAnalysisJob && (
+                  <AnalysisRunPanel
+                    analytics={supplierAnalytics}
+                    job={activeAnalysisJob}
+                    matchCandidates={matchCandidates}
+                    supplier={supplier}
+                    latestAssessment={latestAssessment}
+                  />
+                )}
+                <ResearchTimelinePanel events={researchTimeline} />
+              </details>
             )}
           </>
-        ) : (
-          <p className="muted">Select a supplier.</p>
-        )}
-      </section>
+          ) : (
+            <p className="muted">Select a supplier.</p>
+          )}
+        </div>
+        <WorkspaceSheetTabs
+          activeBoardId={activeCompareBoardId}
+          boardCount={compareBoards.length}
+          boards={compareBoards}
+          hasSupplierWorkspace={supplier !== null}
+          savingBoard={savingBoard}
+          onCreateBoard={() => void createBoardFromSelection()}
+          onOpenBoard={openCompareBoard}
+          onOpenSupplierWorkspace={() => {
+            setActiveCompareBoardId(null)
+            setSupplierComparison(null)
+          }}
+        />
+	      </section>
     </main>
   )
 }
@@ -1368,13 +1689,37 @@ function StatusField({ label, value }: { label: string; value: string }) {
   )
 }
 
-function KnownInformationList({ items }: { items: string[] }) {
+type ResearchTimelineEvent = {
+  occurredAt: string
+  title: string
+  detail: string
+  status: string
+}
+
+function ResearchTimelinePanel({ events }: { events: ResearchTimelineEvent[] }) {
   return (
-    <ul className="known-info-list">
-      {items.map((item) => (
-        <li key={item}>{item}</li>
-      ))}
-    </ul>
+    <section className="research-timeline-panel">
+      <div className="section-heading">
+        <p>Research timeline</p>
+        <span>{events.length} events</span>
+      </div>
+      {events.length === 0 ? (
+        <p className="muted evidence-empty">No research activity stored yet.</p>
+      ) : (
+        <div className="research-timeline-list">
+          {events.map((event, index) => (
+            <article className="research-timeline-event" key={`${event.occurredAt}-${event.title}-${index}`}>
+              <span>{formatShortDate(event.occurredAt)}</span>
+              <div>
+                <strong>{event.title}</strong>
+                <p>{event.detail}</p>
+              </div>
+              <small>{event.status}</small>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
   )
 }
 
@@ -1487,6 +1832,345 @@ function BriefingMemoList({
         <ul>
           {items.map((item, index) => (
             <li key={`${title}-${item}-${index}`}>{item}</li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+function CompareBoardWorkspace({
+  board,
+  boardNameDraft,
+  savingBoard,
+  selectedCompareSupplierIds,
+  onAddSelectedSuppliers,
+  onDeleteBoard,
+  onOpenSupplier,
+  onRemoveSupplier,
+  onRenameBoard,
+  onUpdateBoardName,
+}: {
+  board: CompareBoard
+  boardNameDraft: string
+  savingBoard: boolean
+  selectedCompareSupplierIds: number[]
+  onAddSelectedSuppliers: () => void
+  onDeleteBoard: () => void
+  onOpenSupplier: (supplierId: number) => void
+  onRemoveSupplier: (supplierId: number) => void
+  onRenameBoard: () => void
+  onUpdateBoardName: (value: string) => void
+}) {
+  return (
+    <section className="compare-board-workspace">
+      <header className="compare-board-toolbar">
+        <div className="compare-board-title">
+          <span>Saved compare board</span>
+          <input
+            aria-label="Compare board name"
+            value={boardNameDraft}
+            onChange={(event) => onUpdateBoardName(event.target.value)}
+          />
+          <small>
+            {board.suppliers.length} supplier{board.suppliers.length === 1 ? '' : 's'} saved
+          </small>
+          <p>Choose suppliers in the sidebar, then add them to this board.</p>
+        </div>
+        <div className="compare-board-actions">
+          <button
+            className="ghost"
+            disabled={savingBoard || boardNameDraft.trim().length === 0}
+            type="button"
+            onClick={onRenameBoard}
+          >
+            Rename
+          </button>
+          <button
+            className="primary"
+            disabled={savingBoard || selectedCompareSupplierIds.length === 0}
+            type="button"
+            onClick={onAddSelectedSuppliers}
+          >
+            Add selected
+          </button>
+          <button className="ghost" disabled={savingBoard} type="button" onClick={onDeleteBoard}>
+            Delete board
+          </button>
+        </div>
+      </header>
+
+      {board.comparison.suppliers.length === 0 ? (
+        <section className="compare-empty-board">
+          <strong>No suppliers on this board yet.</strong>
+          <p>Select suppliers in the sidebar, then use Add selected.</p>
+        </section>
+      ) : (
+        <SupplierCompareWorkspace
+          comparison={board.comparison}
+          onOpenSupplier={onOpenSupplier}
+          onRemoveSupplier={onRemoveSupplier}
+          title={board.name}
+        />
+      )}
+    </section>
+  )
+}
+
+function WorkspaceSheetTabs({
+  activeBoardId,
+  boardCount,
+  boards,
+  hasSupplierWorkspace,
+  savingBoard,
+  onCreateBoard,
+  onOpenBoard,
+  onOpenSupplierWorkspace,
+}: {
+  activeBoardId: number | null
+  boardCount: number
+  boards: CompareBoard[]
+  hasSupplierWorkspace: boolean
+  savingBoard: boolean
+  onCreateBoard: () => void
+  onOpenBoard: (boardId: number) => void
+  onOpenSupplierWorkspace: () => void
+}) {
+  return (
+    <nav className="workspace-sheet-tabs" aria-label="Workspace sheets">
+      <button
+        className={activeBoardId === null ? 'active' : ''}
+        disabled={!hasSupplierWorkspace && activeBoardId === null}
+        type="button"
+        onClick={onOpenSupplierWorkspace}
+      >
+        Supplier research
+      </button>
+      {boards.map((board) => (
+        <button
+          className={board.id === activeBoardId ? 'active' : ''}
+          key={board.id}
+          type="button"
+          onClick={() => onOpenBoard(board.id)}
+        >
+          <span>{board.name}</span>
+          <small>{board.suppliers.length}</small>
+        </button>
+      ))}
+      <button
+        aria-label="Create compare board"
+        className="sheet-add"
+        disabled={savingBoard}
+        title={boardCount === 0 ? 'Create first compare board' : 'Create compare board'}
+        type="button"
+        onClick={onCreateBoard}
+      >
+        +
+      </button>
+    </nav>
+  )
+}
+
+function SupplierCompareWorkspace({
+  comparison,
+  onRemoveSupplier,
+  onOpenSupplier,
+  title = 'Supplier comparison',
+}: {
+  comparison: SupplierComparison
+  onRemoveSupplier?: (supplierId: number) => void
+  onOpenSupplier: (supplierId: number) => void
+  title?: string
+}) {
+  const insightItems = [
+    ...comparison.insights.commonCountries.map((item) => `Common country: ${item}`),
+    ...comparison.insights.commonIndustries.map((item) => `Common industry: ${item}`),
+    ...comparison.insights.overlappingTerms.map((item) => `Shared term: ${item}`),
+  ].slice(0, 8)
+
+  return (
+    <section className="compare-workspace">
+      <header className="compare-header">
+        <div>
+          <span>Supplier comparison</span>
+          <h1>{title}</h1>
+          <p>Compare stored research, source coverage, open gaps, and alternatives.</p>
+        </div>
+      </header>
+
+      <section className="compare-insights">
+        <CompareInsightBlock
+          emptyText="No clear overlap found yet."
+          items={insightItems}
+          title="Shared context"
+        />
+        <CompareInsightBlock
+          emptyText="No stored evidence yet."
+          items={comparison.insights.strongestEvidenceSuppliers}
+          title="Strongest evidence"
+        />
+        <CompareInsightBlock
+          emptyText="No weak coverage detected."
+          items={comparison.insights.weakestCoverageSuppliers}
+          title="Weakest coverage"
+        />
+      </section>
+
+      <div className="compare-grid">
+        {comparison.suppliers.map((item) => (
+          <SupplierCompareCard
+            item={item}
+            key={item.supplierId}
+            onRemoveSupplier={onRemoveSupplier}
+            onOpenSupplier={onOpenSupplier}
+          />
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function CompareInsightBlock({
+  emptyText,
+  items,
+  title,
+}: {
+  emptyText: string
+  items: string[]
+  title: string
+}) {
+  return (
+    <article className="compare-insight">
+      <strong>{title}</strong>
+      {items.length === 0 ? (
+        <p>{emptyText}</p>
+      ) : (
+        <ul>
+          {items.map((item) => (
+            <li key={`${title}-${item}`}>{item}</li>
+          ))}
+        </ul>
+      )}
+    </article>
+  )
+}
+
+function SupplierCompareCard({
+  item,
+  onRemoveSupplier,
+  onOpenSupplier,
+}: {
+  item: SupplierComparisonItem
+  onRemoveSupplier?: (supplierId: number) => void
+  onOpenSupplier: (supplierId: number) => void
+}) {
+  return (
+    <article className="compare-card">
+      <header className="compare-card-header">
+        <div>
+          <span>Supplier memo</span>
+          <h2>{item.supplierName}</h2>
+          <p>{item.countryCode} · {item.industry}</p>
+          {item.websiteUrl && (
+            <a href={item.websiteUrl} rel="noreferrer" target="_blank">
+              {readHostname(item.websiteUrl)}
+            </a>
+          )}
+        </div>
+        <dl>
+          <div>
+            <dt>Sources</dt>
+            <dd>{item.reachableSourceCount}</dd>
+          </div>
+          <div>
+            <dt>Facts</dt>
+            <dd>{item.knownFacts.length}</dd>
+          </div>
+          <div>
+            <dt>Related</dt>
+            <dd>{item.relatedSupplierCount}</dd>
+          </div>
+        </dl>
+      </header>
+
+      <section className="compare-memo-section compare-memo-summary">
+        <h3>What this supplier appears to do</h3>
+        <p>{item.companySummary}</p>
+      </section>
+
+      <div className="compare-memo-grid">
+        <CompareList
+          emptyText="No product or service facts yet."
+          items={item.productsAndServices.slice(0, 3)}
+          title="Products / services"
+        />
+        <CompareList
+          emptyText="No location or market facts yet."
+          items={item.locationsAndMarkets.slice(0, 3)}
+          title="Locations / markets"
+        />
+      </div>
+
+      <CompareList
+        emptyText="No known facts extracted yet."
+        items={item.knownFacts.slice(0, 4)}
+        title="Useful facts"
+      />
+      <CompareList
+        emptyText="No open gaps listed."
+        items={item.openQuestions.slice(0, 3)}
+        title="Open gaps"
+      />
+
+      <section className="compare-list">
+        <strong>Useful sources</strong>
+        {item.usefulSources.length === 0 ? (
+          <p>No sources stored yet.</p>
+        ) : (
+          <ul>
+            {item.usefulSources.slice(0, 3).map((source) => (
+              <li key={`${item.supplierId}-${source.sourceName}-${source.url}`}>
+                <span>{source.sourceName} ({source.status})</span>
+                <small>{readHostname(source.url) ?? source.url}</small>
+                {source.summary && <p>{source.summary}</p>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <div className="compare-card-actions">
+        <button className="ghost compare-open-button" type="button" onClick={() => onOpenSupplier(item.supplierId)}>
+          Open full briefing
+        </button>
+        {onRemoveSupplier && (
+          <button className="ghost" type="button" onClick={() => onRemoveSupplier(item.supplierId)}>
+            Remove
+          </button>
+        )}
+      </div>
+    </article>
+  )
+}
+
+function CompareList({
+  emptyText,
+  items,
+  title,
+}: {
+  emptyText: string
+  items: string[]
+  title: string
+}) {
+  return (
+    <section className="compare-list compare-memo-section">
+      <strong>{title}</strong>
+      {items.length === 0 ? (
+        <p>{emptyText}</p>
+      ) : (
+        <ul>
+          {items.map((item) => (
+            <li key={`${title}-${item}`}>{item}</li>
           ))}
         </ul>
       )}
@@ -2114,28 +2798,6 @@ function isDevelopmentSupplier(item: SupplierSummary) {
     website.includes('learning-demo')
 }
 
-function buildVisibleMatchCandidates(candidates: SupplierMatchCandidate[]) {
-  const visible = new Map<string, SupplierMatchCandidate>()
-
-  for (const candidate of candidates) {
-    if (candidate.status === 'Rejected') {
-      continue
-    }
-
-    const key = [
-      normalizeIdentityPart(formatCandidateDisplayName(candidate.candidateName)),
-      candidate.countryCode?.trim().toUpperCase() ?? '',
-    ].join('|')
-    const existing = visible.get(key)
-
-    if (!existing || compareMatchCandidates(candidate, existing) < 0) {
-      visible.set(key, candidate)
-    }
-  }
-
-  return [...visible.values()].sort(compareMatchCandidates)
-}
-
 function buildKnownInformation({
   supplier,
   confirmedIdentity,
@@ -2224,6 +2886,74 @@ function buildOpenQuestionItems({
   }
 
   return distinctText(items).slice(0, 8)
+}
+
+function buildResearchTimeline(
+  supplier: SupplierDetail,
+  matchCandidates: SupplierMatchCandidate[],
+): ResearchTimelineEvent[] {
+  const events: ResearchTimelineEvent[] = [
+    {
+      occurredAt: supplier.createdAt,
+      title: 'Supplier created',
+      detail: `${supplier.name} was added for ${supplier.countryCode} · ${supplier.industry}.`,
+      status: 'Profile',
+    },
+  ]
+
+  for (const job of safeArray(supplier.analysisJobs)) {
+    events.push({
+      occurredAt: job.createdAt,
+      title: `Analysis ${job.status.toLowerCase()}`,
+      detail: job.errorMessage
+        ? `${job.progressMessage} ${job.errorMessage}`
+        : job.progressMessage,
+      status: job.jobType,
+    })
+  }
+
+  for (const sourceCheck of safeArray(supplier.sourceChecks)) {
+    events.push({
+      occurredAt: sourceCheck.checkedAt,
+      title: sourceCheck.status === 'Reachable' ? 'Source found' : 'Source issue',
+      detail: `${sourceCheck.sourceName}: ${shortenText(sourceCheck.notes || sourceCheck.url, 160)}`,
+      status: formatSourceStatus(sourceCheck.status),
+    })
+  }
+
+  for (const fact of safeArray(supplier.supplierFacts)) {
+    events.push({
+      occurredAt: fact.createdAt,
+      title: 'Fact extracted',
+      detail: `${formatFactType(fact.factType)}: ${shortenText(fact.value, 160)}`,
+      status: fact.confidence,
+    })
+  }
+
+  for (const assessment of safeArray(supplier.riskAssessments)) {
+    events.push({
+      occurredAt: assessment.createdAt,
+      title: 'Research memo generated',
+      detail: shortenText(cleanBriefingText(assessment.summaryMarkdown), 180),
+      status: assessment.riskLevel === 'Unknown' ? 'Memo' : assessment.riskLevel,
+    })
+  }
+
+  for (const candidate of safeArray(matchCandidates)) {
+    events.push({
+      occurredAt: candidate.reviewedAt ?? candidate.createdAt,
+      title: candidate.status === 'Proposed'
+        ? 'Match candidate proposed'
+        : `Match ${candidate.status.toLowerCase()}`,
+      detail: `${candidate.candidateName}: ${shortenText(candidate.matchReason, 160)}`,
+      status: formatCandidateStatus(candidate.status),
+    })
+  }
+
+  return events
+    .filter((event) => Boolean(event.occurredAt))
+    .sort((left, right) => Date.parse(right.occurredAt) - Date.parse(left.occurredAt))
+    .slice(0, 12)
 }
 
 function buildKnownSupplierFacts(facts: SupplierFact[]) {
@@ -2389,6 +3119,10 @@ function distinctText(items: string[]) {
   const seen = new Set<string>()
   return items.filter((item) => {
     const key = item.trim().toLowerCase()
+    if (key.length === 0) {
+      return false
+    }
+
     if (seen.has(key)) {
       return false
     }
@@ -2396,6 +3130,26 @@ function distinctText(items: string[]) {
     seen.add(key)
     return true
   })
+}
+
+function buildDefaultBoardName(supplierIds: number[], suppliers: SupplierSummary[]) {
+  const selectedSuppliers = supplierIds
+    .map((supplierId) => suppliers.find((supplier) => supplier.id === supplierId))
+    .filter((supplier): supplier is SupplierSummary => supplier !== undefined)
+
+  if (selectedSuppliers.length === 0) {
+    return 'New compare board'
+  }
+
+  if (selectedSuppliers.length === 1) {
+    return `${selectedSuppliers[0].name} alternatives`
+  }
+
+  const industries = distinctText(selectedSuppliers.map((supplier) => supplier.industry)).slice(0, 2)
+  const countries = distinctText(selectedSuppliers.map((supplier) => supplier.countryCode)).slice(0, 2)
+  const boardName = distinctText([...industries, ...countries]).join(' / ')
+
+  return boardName.length > 0 ? boardName : `${selectedSuppliers.length} supplier comparison`
 }
 
 function formatFactType(value: string) {
@@ -2538,8 +3292,8 @@ function buildRuntimeKeyMessage(action: 'save' | 'test', status: LocalModelStatu
     return {
       tone: 'ok' as const,
       text: action === 'save'
-        ? `OpenRouter key saved for this run${keyLabel}. Connection works (${status.models.length} models found).`
-        : `OpenRouter connection works${keyLabel} (${status.models.length} models found).`,
+        ? `OpenRouter key saved for this run${keyLabel}. Chat test works; rerun the analysis to replace older failed runs.`
+        : `OpenRouter chat test works${keyLabel}. You can rerun the analysis now.`,
     }
   }
 
@@ -2547,69 +3301,6 @@ function buildRuntimeKeyMessage(action: 'save' | 'test', status: LocalModelStatu
     tone: 'error' as const,
     text: status.errorMessage ?? 'OpenRouter key is configured, but the connection test failed.',
   }
-}
-
-function buildNextAction({
-  hasConfirmedIdentity,
-  loadingMatchCandidates,
-  matchCandidateCount,
-  nextEvidenceCount,
-  latestAssessment,
-}: {
-  hasConfirmedIdentity: boolean
-  loadingMatchCandidates: boolean
-  matchCandidateCount: number
-  nextEvidenceCount: number
-  latestAssessment: RiskAssessment | undefined
-}): {
-  title: string
-  description: string
-  buttonLabel: string
-  status: string
-  step: ReviewStep
-} {
-  if (nextEvidenceCount > 0) {
-    return {
-      title: 'Review source gaps',
-      description: 'Useful research may be available, but some source or fact gaps still need attention.',
-      buttonLabel: 'Review sources',
-      status: `${nextEvidenceCount} open gaps`,
-      step: 'sources',
-    }
-  }
-
-  if (!latestAssessment) {
-    return {
-      title: 'Review open questions',
-      description: 'Sources are available, but no research memo has been stored for unresolved questions yet.',
-      buttonLabel: 'Open questions',
-      status: 'Questions pending',
-      step: 'questions',
-    }
-  }
-
-  return {
-    title: 'Research briefing ready',
-    description: 'The main public research inputs are available. Review similar suppliers and recommendations.',
-    buttonLabel: 'Open connections',
-    status: 'Ready',
-    step: 'connections',
-  }
-}
-
-function summarizeMatchCandidates(candidates: SupplierMatchCandidate[]) {
-  const confirmed = candidates.filter((candidate) => candidate.status === 'Confirmed').length
-  const proposed = candidates.filter((candidate) => candidate.status === 'Proposed').length
-
-  if (confirmed > 0) {
-    return `${confirmed} confirmed`
-  }
-
-  if (proposed > 0) {
-    return `${proposed} proposed`
-  }
-
-  return `${candidates.length} candidates`
 }
 
 function compareMatchCandidates(a: SupplierMatchCandidate, b: SupplierMatchCandidate) {
@@ -2902,6 +3593,28 @@ function formatSourceKind(sourceCheck: SourceCheck) {
   }
 
   return 'public source'
+}
+
+function downloadTextFile(content: string, fileName: string, contentType: string) {
+  const blob = new Blob([content], { type: contentType })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+
+  link.href = url
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
+function buildDownloadSlug(value: string) {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+  return slug || 'supplier'
 }
 
 function readError(exception: unknown) {

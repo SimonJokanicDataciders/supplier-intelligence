@@ -47,6 +47,64 @@ public sealed record ResearchWebsiteSourceRequest(string Url);
 
 public sealed record RecheckOpenQuestionsRequest(IReadOnlyList<string> Questions);
 
+public sealed record CompareSuppliersRequest(IReadOnlyList<int> SupplierIds);
+
+public sealed record CreateCompareBoardRequest(
+    string Name,
+    IReadOnlyList<int>? SupplierIds);
+
+public sealed record UpdateCompareBoardRequest(string Name);
+
+public sealed record CompareBoardResponse(
+    int Id,
+    string Name,
+    DateTime CreatedAt,
+    DateTime UpdatedAt,
+    IReadOnlyList<CompareBoardSupplierResponse> Suppliers,
+    SupplierComparisonResponse Comparison);
+
+public sealed record CompareBoardSupplierResponse(
+    int SupplierId,
+    string SupplierName,
+    string CountryCode,
+    string Industry,
+    string? WebsiteUrl,
+    int SortOrder,
+    DateTime AddedAt);
+
+public sealed record SupplierComparisonResponse(
+    IReadOnlyList<SupplierComparisonItemResponse> Suppliers,
+    SupplierComparisonInsightsResponse Insights);
+
+public sealed record SupplierComparisonItemResponse(
+    int SupplierId,
+    string SupplierName,
+    string CountryCode,
+    string Industry,
+    string? WebsiteUrl,
+    string CompanySummary,
+    IReadOnlyList<string> ProductsAndServices,
+    IReadOnlyList<string> LocationsAndMarkets,
+    int ReachableSourceCount,
+    int FailedSourceCount,
+    IReadOnlyList<SupplierComparisonSourceResponse> UsefulSources,
+    IReadOnlyList<string> KnownFacts,
+    IReadOnlyList<string> OpenQuestions,
+    int RelatedSupplierCount);
+
+public sealed record SupplierComparisonSourceResponse(
+    string SourceName,
+    string Url,
+    string Status,
+    string Summary);
+
+public sealed record SupplierComparisonInsightsResponse(
+    IReadOnlyList<string> CommonCountries,
+    IReadOnlyList<string> CommonIndustries,
+    IReadOnlyList<string> OverlappingTerms,
+    IReadOnlyList<string> StrongestEvidenceSuppliers,
+    IReadOnlyList<string> WeakestCoverageSuppliers);
+
 public sealed record RecheckOpenQuestionsResponse(
     IReadOnlyList<OpenQuestionResolutionResponse> Resolved,
     IReadOnlyList<OpenQuestionResolutionResponse> Unresolved);

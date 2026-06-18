@@ -10,6 +10,8 @@ public interface ILocalModelClient
 
     Task<IReadOnlyList<LocalModelInfo>> GetModelsAsync(CancellationToken cancellationToken);
 
+    Task ValidateAsync(CancellationToken cancellationToken);
+
     Task<string> ChatAsync(
         string model,
         string systemPrompt,

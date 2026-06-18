@@ -13,6 +13,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<RiskAssessment> RiskAssessments => Set<RiskAssessment>();
     public DbSet<AnalysisJob> AnalysisJobs => Set<AnalysisJob>();
     public DbSet<SupplierMatchCandidate> SupplierMatchCandidates => Set<SupplierMatchCandidate>();
+    public DbSet<CompareBoard> CompareBoards => Set<CompareBoard>();
+    public DbSet<CompareBoardSupplier> CompareBoardSuppliers => Set<CompareBoardSupplier>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -101,6 +103,29 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             candidate.HasOne(c => c.Supplier)
                 .WithMany(s => s.MatchCandidates)
                 .HasForeignKey(c => c.SupplierId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CompareBoard>(board =>
+        {
+            board.Property(b => b.Name)
+                .HasMaxLength(160)
+                .IsRequired();
+
+            board.HasMany(b => b.Suppliers)
+                .WithOne(s => s.CompareBoard)
+                .HasForeignKey(s => s.CompareBoardId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CompareBoardSupplier>(boardSupplier =>
+        {
+            boardSupplier.HasIndex(s => new { s.CompareBoardId, s.SupplierId })
+                .IsUnique();
+
+            boardSupplier.HasOne(s => s.Supplier)
+                .WithMany(s => s.CompareBoardSuppliers)
+                .HasForeignKey(s => s.SupplierId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 

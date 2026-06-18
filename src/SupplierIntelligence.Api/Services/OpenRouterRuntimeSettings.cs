@@ -48,9 +48,18 @@ public sealed class OpenRouterRuntimeSettings
 
     public static string SanitizeApiKey(string value)
     {
-        return new string(value
+        var compactValue = new string(value
             .Where(character => !char.IsWhiteSpace(character) && character != '\0')
             .ToArray());
+
+        var keyStart = compactValue.IndexOf("sk-or-", StringComparison.OrdinalIgnoreCase);
+
+        if (keyStart >= 0)
+        {
+            compactValue = compactValue[keyStart..];
+        }
+
+        return compactValue.Trim('"', '\'', '`', ';', ',', '.');
     }
 
     public static string BuildFingerprint(string? value)

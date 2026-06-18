@@ -20,6 +20,7 @@ public static class LocalModelEndpoints
             try
             {
                 var models = await localModel.GetModelsAsync(cancellationToken);
+                await localModel.ValidateAsync(cancellationToken);
 
                 return Results.Ok(new LocalModelStatusResponse(
                     localModel.Provider,

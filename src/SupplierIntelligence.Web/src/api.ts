@@ -162,6 +162,62 @@ export type SupplierConnection = {
   sharedTerms: string[]
 }
 
+export type SupplierComparisonSource = {
+  sourceName: string
+  url: string
+  status: string
+  summary: string
+}
+
+export type SupplierComparisonItem = {
+  supplierId: number
+  supplierName: string
+  countryCode: string
+  industry: string
+  websiteUrl: string | null
+  companySummary: string
+  productsAndServices: string[]
+  locationsAndMarkets: string[]
+  reachableSourceCount: number
+  failedSourceCount: number
+  usefulSources: SupplierComparisonSource[]
+  knownFacts: string[]
+  openQuestions: string[]
+  relatedSupplierCount: number
+}
+
+export type SupplierComparisonInsights = {
+  commonCountries: string[]
+  commonIndustries: string[]
+  overlappingTerms: string[]
+  strongestEvidenceSuppliers: string[]
+  weakestCoverageSuppliers: string[]
+}
+
+export type SupplierComparison = {
+  suppliers: SupplierComparisonItem[]
+  insights: SupplierComparisonInsights
+}
+
+export type CompareBoardSupplier = {
+  supplierId: number
+  supplierName: string
+  countryCode: string
+  industry: string
+  websiteUrl: string | null
+  sortOrder: number
+  addedAt: string
+}
+
+export type CompareBoard = {
+  id: number
+  name: string
+  createdAt: string
+  updatedAt: string
+  suppliers: CompareBoardSupplier[]
+  comparison: SupplierComparison
+}
+
 export type OpenQuestionResolution = {
   question: string
   status: string
@@ -292,6 +348,23 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
+async function requestText(url: string, init?: RequestInit): Promise<string> {
+  const response = await fetch(url, init)
+
+  if (!response.ok) {
+    let message = `${response.status} ${response.statusText}`
+
+    try {
+      const body = (await response.json()) as { error?: string; detail?: string; title?: string }
+      message = body.error ?? body.detail ?? body.title ?? message
+    } catch {}
+
+    throw new Error(message)
+  }
+
+  return response.text()
+}
+
 export function getSuppliers() {
   return request<SupplierSummary[]>('/api/suppliers')
 }
@@ -310,6 +383,53 @@ export function getSupplierAnalytics(id: number) {
 
 export function getSupplierConnections(id: number) {
   return request<SupplierConnection[]>(`/api/suppliers/${id}/connections`)
+}
+
+export function compareSuppliers(supplierIds: number[]) {
+  return request<SupplierComparison>('/api/suppliers/compare', {
+    method: 'POST',
+    body: JSON.stringify({ supplierIds }),
+  })
+}
+
+export function getCompareBoards() {
+  return request<CompareBoard[]>('/api/compare-boards/')
+}
+
+export function createCompareBoard(name: string, supplierIds: number[]) {
+  return request<CompareBoard>('/api/compare-boards/', {
+    method: 'POST',
+    body: JSON.stringify({ name, supplierIds }),
+  })
+}
+
+export function renameCompareBoard(boardId: number, name: string) {
+  return request<CompareBoard>(`/api/compare-boards/${boardId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name }),
+  })
+}
+
+export function addSupplierToCompareBoard(boardId: number, supplierId: number) {
+  return request<CompareBoard>(`/api/compare-boards/${boardId}/suppliers/${supplierId}`, {
+    method: 'POST',
+  })
+}
+
+export function removeSupplierFromCompareBoard(boardId: number, supplierId: number) {
+  return request<CompareBoard>(`/api/compare-boards/${boardId}/suppliers/${supplierId}`, {
+    method: 'DELETE',
+  })
+}
+
+export function deleteCompareBoard(boardId: number) {
+  return request<void>(`/api/compare-boards/${boardId}`, {
+    method: 'DELETE',
+  })
+}
+
+export function exportSupplierReportMarkdown(id: number) {
+  return requestText(`/api/suppliers/${id}/report.md`)
 }
 
 export function recheckOpenQuestions(id: number, questions: string[]) {

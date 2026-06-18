@@ -21,4 +21,5 @@ public class Supplier
     public List<RiskAssessment> RiskAssessments { get; set; } = [];
     public List<AnalysisJob> AnalysisJobs { get; set; } = [];
     public List<SupplierMatchCandidate> MatchCandidates { get; set; } = [];
+    public List<CompareBoardSupplier> CompareBoardSuppliers { get; set; } = [];
 }

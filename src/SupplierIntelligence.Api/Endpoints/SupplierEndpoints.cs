@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -12,10 +13,14 @@ namespace SupplierIntelligence.Api.Endpoints;
 
 public static class SupplierEndpoints
 {
+    private const int MaxCompareBoardSuppliers = 6;
+
     public static IEndpointRouteBuilder MapSupplierEndpoints(this IEndpointRouteBuilder app)
     {
         var suppliers = app.MapGroup("/api/suppliers")
             .WithTags("Suppliers");
+        var compareBoards = app.MapGroup("/api/compare-boards")
+            .WithTags("Compare Boards");
 
         suppliers.MapGet("/", async (
             bool? includeArchived,
@@ -71,6 +76,342 @@ public static class SupplierEndpoints
         .WithSummary("List suppliers")
         .WithDescription("Returns all suppliers with compact counts for certifications, source checks, and saved risk assessments.")
         .WithName("GetSuppliers");
+
+        suppliers.MapPost("/compare", async (
+            CompareSuppliersRequest request,
+            AppDbContext db,
+            CancellationToken cancellationToken) =>
+        {
+            var supplierIds = request.SupplierIds?
+                .Distinct()
+                .ToList() ?? [];
+
+            if (supplierIds.Count < 2)
+            {
+                return Results.BadRequest(new { error = "Select at least 2 suppliers to compare." });
+            }
+
+            if (supplierIds.Count > 4)
+            {
+                return Results.BadRequest(new { error = "Compare supports up to 4 suppliers at once." });
+            }
+
+            var suppliersWithResearch = await db.Suppliers
+                .AsNoTracking()
+                .Include(s => s.SourceChecks)
+                .Include(s => s.ResearchSources)
+                .Include(s => s.SupplierFacts)
+                .Include(s => s.RiskAssessments)
+                .Where(s => !s.IsArchived)
+                .AsSplitQuery()
+                .ToListAsync(cancellationToken);
+            var selectedSuppliers = suppliersWithResearch
+                .Where(supplier => supplierIds.Contains(supplier.Id))
+                .OrderBy(supplier => supplierIds.IndexOf(supplier.Id))
+                .ToList();
+
+            if (selectedSuppliers.Count != supplierIds.Count)
+            {
+                return Results.BadRequest(new { error = "One or more selected suppliers do not exist or are archived." });
+            }
+
+            return Results.Ok(BuildSupplierComparison(selectedSuppliers, suppliersWithResearch));
+        })
+        .Accepts<CompareSuppliersRequest>("application/json")
+        .Produces<SupplierComparisonResponse>()
+        .Produces(StatusCodes.Status400BadRequest)
+        .WithSummary("Compare suppliers")
+        .WithDescription("Compares 2-4 non-archived suppliers using stored facts, source checks, research notes, and connection terms.")
+        .WithName("CompareSuppliers");
+
+        compareBoards.MapGet("/", async (
+            AppDbContext db,
+            CancellationToken cancellationToken) =>
+        {
+            var boards = await db.CompareBoards
+                .AsNoTracking()
+                .Include(board => board.Suppliers)
+                .ThenInclude(boardSupplier => boardSupplier.Supplier)
+                .OrderByDescending(board => board.UpdatedAt)
+                .AsSplitQuery()
+                .ToListAsync(cancellationToken);
+            var suppliersWithResearch = await LoadSuppliersWithResearchAsync(db, cancellationToken);
+
+            return Results.Ok(boards
+                .Select(board => ToCompareBoardResponse(board, suppliersWithResearch))
+                .ToList());
+        })
+        .Produces<List<CompareBoardResponse>>()
+        .WithSummary("List compare boards")
+        .WithDescription("Returns saved supplier comparison workspaces with their current supplier members and comparison data.")
+        .WithName("GetCompareBoards");
+
+        compareBoards.MapPost("/", async (
+            CreateCompareBoardRequest request,
+            AppDbContext db,
+            CancellationToken cancellationToken) =>
+        {
+            var name = NormalizeCompareBoardName(request.Name);
+            if (name is null)
+            {
+                return Results.BadRequest(new { error = "Board name is required and must be 160 characters or shorter." });
+            }
+
+            var supplierIds = (request.SupplierIds ?? [])
+                .Distinct()
+                .Take(MaxCompareBoardSuppliers + 1)
+                .ToList();
+            if (supplierIds.Count > MaxCompareBoardSuppliers)
+            {
+                return Results.BadRequest(new { error = $"A compare board can contain up to {MaxCompareBoardSuppliers} suppliers." });
+            }
+
+            var suppliersToAdd = await db.Suppliers
+                .Where(supplier => supplierIds.Contains(supplier.Id) && !supplier.IsArchived)
+                .ToListAsync(cancellationToken);
+            if (suppliersToAdd.Count != supplierIds.Count)
+            {
+                return Results.BadRequest(new { error = "One or more selected suppliers do not exist or are archived." });
+            }
+
+            var now = DateTime.UtcNow;
+            var board = new CompareBoard
+            {
+                Name = name,
+                CreatedAt = now,
+                UpdatedAt = now,
+                Suppliers = supplierIds
+                    .Select((supplierId, index) => new CompareBoardSupplier
+                    {
+                        SupplierId = supplierId,
+                        SortOrder = index,
+                        AddedAt = now
+                    })
+                    .ToList()
+            };
+
+            db.CompareBoards.Add(board);
+            await db.SaveChangesAsync(cancellationToken);
+
+            board = await LoadCompareBoardAsync(db, board.Id, cancellationToken) ?? board;
+            var suppliersWithResearch = await LoadSuppliersWithResearchAsync(db, cancellationToken);
+
+            return Results.Created(
+                $"/api/compare-boards/{board.Id}",
+                ToCompareBoardResponse(board, suppliersWithResearch));
+        })
+        .Accepts<CreateCompareBoardRequest>("application/json")
+        .Produces<CompareBoardResponse>(StatusCodes.Status201Created)
+        .Produces(StatusCodes.Status400BadRequest)
+        .WithSummary("Create compare board")
+        .WithDescription("Creates a saved comparison workspace. It can start empty or with up to six suppliers.")
+        .WithName("CreateCompareBoard");
+
+        compareBoards.MapGet("/{boardId:int}", async (
+            int boardId,
+            AppDbContext db,
+            CancellationToken cancellationToken) =>
+        {
+            var board = await LoadCompareBoardAsync(db, boardId, cancellationToken);
+            if (board is null)
+            {
+                return Results.NotFound();
+            }
+
+            var suppliersWithResearch = await LoadSuppliersWithResearchAsync(db, cancellationToken);
+            return Results.Ok(ToCompareBoardResponse(board, suppliersWithResearch));
+        })
+        .Produces<CompareBoardResponse>()
+        .Produces(StatusCodes.Status404NotFound)
+        .WithSummary("Get compare board")
+        .WithDescription("Returns one saved comparison workspace with comparison data.")
+        .WithName("GetCompareBoard");
+
+        compareBoards.MapPatch("/{boardId:int}", async (
+            int boardId,
+            UpdateCompareBoardRequest request,
+            AppDbContext db,
+            CancellationToken cancellationToken) =>
+        {
+            var name = NormalizeCompareBoardName(request.Name);
+            if (name is null)
+            {
+                return Results.BadRequest(new { error = "Board name is required and must be 160 characters or shorter." });
+            }
+
+            var board = await db.CompareBoards
+                .FirstOrDefaultAsync(item => item.Id == boardId, cancellationToken);
+            if (board is null)
+            {
+                return Results.NotFound();
+            }
+
+            board.Name = name;
+            board.UpdatedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(cancellationToken);
+
+            var reloadedBoard = await LoadCompareBoardAsync(db, boardId, cancellationToken);
+            var suppliersWithResearch = await LoadSuppliersWithResearchAsync(db, cancellationToken);
+            return Results.Ok(ToCompareBoardResponse(reloadedBoard!, suppliersWithResearch));
+        })
+        .Accepts<UpdateCompareBoardRequest>("application/json")
+        .Produces<CompareBoardResponse>()
+        .Produces(StatusCodes.Status400BadRequest)
+        .Produces(StatusCodes.Status404NotFound)
+        .WithSummary("Rename compare board")
+        .WithName("RenameCompareBoard");
+
+        compareBoards.MapPost("/{boardId:int}/suppliers/{supplierId:int}", async (
+            int boardId,
+            int supplierId,
+            AppDbContext db,
+            CancellationToken cancellationToken) =>
+        {
+            var board = await db.CompareBoards
+                .Include(item => item.Suppliers)
+                .FirstOrDefaultAsync(item => item.Id == boardId, cancellationToken);
+            if (board is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (board.Suppliers.Any(item => item.SupplierId == supplierId))
+            {
+                var existingBoard = await LoadCompareBoardAsync(db, boardId, cancellationToken);
+                var existingSuppliersWithResearch = await LoadSuppliersWithResearchAsync(db, cancellationToken);
+                return Results.Ok(ToCompareBoardResponse(existingBoard!, existingSuppliersWithResearch));
+            }
+
+            if (board.Suppliers.Count >= MaxCompareBoardSuppliers)
+            {
+                return Results.BadRequest(new { error = $"A compare board can contain up to {MaxCompareBoardSuppliers} suppliers." });
+            }
+
+            var supplierExists = await db.Suppliers
+                .AnyAsync(supplier => supplier.Id == supplierId && !supplier.IsArchived, cancellationToken);
+            if (!supplierExists)
+            {
+                return Results.BadRequest(new { error = "Supplier does not exist or is archived." });
+            }
+
+            var now = DateTime.UtcNow;
+            board.Suppliers.Add(new CompareBoardSupplier
+            {
+                SupplierId = supplierId,
+                SortOrder = board.Suppliers.Count == 0 ? 0 : board.Suppliers.Max(item => item.SortOrder) + 1,
+                AddedAt = now
+            });
+            board.UpdatedAt = now;
+            await db.SaveChangesAsync(cancellationToken);
+
+            var reloadedBoard = await LoadCompareBoardAsync(db, boardId, cancellationToken);
+            var suppliersWithResearch = await LoadSuppliersWithResearchAsync(db, cancellationToken);
+            return Results.Ok(ToCompareBoardResponse(reloadedBoard!, suppliersWithResearch));
+        })
+        .Produces<CompareBoardResponse>()
+        .Produces(StatusCodes.Status400BadRequest)
+        .Produces(StatusCodes.Status404NotFound)
+        .WithSummary("Add supplier to compare board")
+        .WithName("AddSupplierToCompareBoard");
+
+        compareBoards.MapDelete("/{boardId:int}/suppliers/{supplierId:int}", async (
+            int boardId,
+            int supplierId,
+            AppDbContext db,
+            CancellationToken cancellationToken) =>
+        {
+            var board = await db.CompareBoards
+                .Include(item => item.Suppliers)
+                .FirstOrDefaultAsync(item => item.Id == boardId, cancellationToken);
+            if (board is null)
+            {
+                return Results.NotFound();
+            }
+
+            var boardSupplier = board.Suppliers.FirstOrDefault(item => item.SupplierId == supplierId);
+            if (boardSupplier is not null)
+            {
+                db.CompareBoardSuppliers.Remove(boardSupplier);
+                board.UpdatedAt = DateTime.UtcNow;
+                await db.SaveChangesAsync(cancellationToken);
+            }
+
+            var reloadedBoard = await LoadCompareBoardAsync(db, boardId, cancellationToken);
+            var suppliersWithResearch = await LoadSuppliersWithResearchAsync(db, cancellationToken);
+            return Results.Ok(ToCompareBoardResponse(reloadedBoard!, suppliersWithResearch));
+        })
+        .Produces<CompareBoardResponse>()
+        .Produces(StatusCodes.Status404NotFound)
+        .WithSummary("Remove supplier from compare board")
+        .WithName("RemoveSupplierFromCompareBoard");
+
+        compareBoards.MapDelete("/{boardId:int}", async (
+            int boardId,
+            AppDbContext db,
+            CancellationToken cancellationToken) =>
+        {
+            var board = await db.CompareBoards
+                .FirstOrDefaultAsync(item => item.Id == boardId, cancellationToken);
+            if (board is null)
+            {
+                return Results.NotFound();
+            }
+
+            db.CompareBoards.Remove(board);
+            await db.SaveChangesAsync(cancellationToken);
+            return Results.NoContent();
+        })
+        .Produces(StatusCodes.Status204NoContent)
+        .Produces(StatusCodes.Status404NotFound)
+        .WithSummary("Delete compare board")
+        .WithName("DeleteCompareBoard");
+
+        suppliers.MapGet("/{id:int}/report.md", async (
+            int id,
+            AppDbContext db,
+            CancellationToken cancellationToken) =>
+        {
+            var suppliersWithResearch = await db.Suppliers
+                .AsNoTracking()
+                .Include(s => s.SourceChecks)
+                .Include(s => s.ResearchSources)
+                .Include(s => s.SupplierFacts)
+                .Include(s => s.RiskAssessments)
+                .Where(s => !s.IsArchived)
+                .AsSplitQuery()
+                .ToListAsync(cancellationToken);
+            var supplier = await db.Suppliers
+                .AsNoTracking()
+                .Include(s => s.Certifications)
+                .Include(s => s.SourceChecks)
+                .Include(s => s.ResearchSources)
+                .Include(s => s.SupplierFacts)
+                .Include(s => s.RiskAssessments)
+                .Include(s => s.AnalysisJobs)
+                .Include(s => s.MatchCandidates)
+                .AsSplitQuery()
+                .FirstOrDefaultAsync(s => s.Id == id && !s.IsArchived, cancellationToken);
+
+            if (supplier is null)
+            {
+                return Results.NotFound();
+            }
+
+            var markdown = BuildSupplierMarkdownReport(
+                supplier,
+                BuildSupplierConnections(supplier, suppliersWithResearch));
+            var fileName = $"{SlugifyFileName(supplier.Name)}-supplier-report.md";
+
+            return Results.File(
+                Encoding.UTF8.GetBytes(markdown),
+                "text/markdown; charset=utf-8",
+                fileName);
+        })
+        .Produces(StatusCodes.Status200OK, contentType: "text/markdown")
+        .Produces(StatusCodes.Status404NotFound)
+        .WithSummary("Export supplier report as Markdown")
+        .WithDescription("Exports the selected supplier briefing, facts, sources, open gaps, and related suppliers as a Markdown report.")
+        .WithName("ExportSupplierMarkdownReport");
 
         suppliers.MapGet("/{id:int}", async (int id, AppDbContext db) =>
         {
@@ -1604,6 +1945,467 @@ public static class SupplierEndpoints
                 connection.Reasons,
                 connection.SharedTerms))
             .ToList();
+    }
+
+    private static SupplierComparisonResponse BuildSupplierComparison(
+        IReadOnlyList<Supplier> selectedSuppliers,
+        IReadOnlyList<Supplier> suppliersWithResearch)
+    {
+        var items = selectedSuppliers
+            .Select(supplier =>
+            {
+                var connections = BuildSupplierConnections(supplier, suppliersWithResearch);
+                return BuildSupplierComparisonItem(supplier, connections.Count);
+            })
+            .ToList();
+
+        var selectedTerms = selectedSuppliers
+            .Select(supplier => ExtractSupplierConnectionTerms(supplier))
+            .ToList();
+        var overlappingTerms = selectedTerms.Count == 0
+            ? []
+            : selectedTerms
+                .Skip(1)
+                .Aggregate(
+                    selectedTerms[0],
+                    (current, next) => current.Intersect(next, StringComparer.OrdinalIgnoreCase).ToHashSet(StringComparer.OrdinalIgnoreCase))
+                .Where(term => term.Length >= 4)
+                .OrderBy(term => term)
+                .Take(8)
+                .ToList();
+
+        var strongestEvidence = items
+            .OrderByDescending(item => item.ReachableSourceCount)
+            .ThenByDescending(item => item.KnownFacts.Count)
+            .Take(2)
+            .Select(item => $"{item.SupplierName}: {item.ReachableSourceCount} reachable sources, {item.KnownFacts.Count} facts")
+            .ToList();
+        var weakestCoverage = items
+            .OrderBy(item => item.ReachableSourceCount)
+            .ThenBy(item => item.KnownFacts.Count)
+            .Take(2)
+            .Select(item => $"{item.SupplierName}: {item.ReachableSourceCount} reachable sources, {item.OpenQuestions.Count} open gaps")
+            .ToList();
+
+        return new SupplierComparisonResponse(
+            items,
+            new SupplierComparisonInsightsResponse(
+                selectedSuppliers
+                    .GroupBy(supplier => supplier.CountryCode, StringComparer.OrdinalIgnoreCase)
+                    .Where(group => group.Count() > 1)
+                    .Select(group => group.Key)
+                    .Order()
+                    .ToList(),
+                selectedSuppliers
+                    .GroupBy(supplier => supplier.Industry, StringComparer.OrdinalIgnoreCase)
+                    .Where(group => group.Count() > 1)
+                    .Select(group => group.Key)
+                    .Order()
+                    .ToList(),
+                overlappingTerms,
+                strongestEvidence,
+                weakestCoverage));
+    }
+
+    private static async Task<List<Supplier>> LoadSuppliersWithResearchAsync(
+        AppDbContext db,
+        CancellationToken cancellationToken)
+    {
+        return await db.Suppliers
+            .AsNoTracking()
+            .Include(s => s.SourceChecks)
+            .Include(s => s.ResearchSources)
+            .Include(s => s.SupplierFacts)
+            .Include(s => s.RiskAssessments)
+            .Where(s => !s.IsArchived)
+            .AsSplitQuery()
+            .ToListAsync(cancellationToken);
+    }
+
+    private static async Task<CompareBoard?> LoadCompareBoardAsync(
+        AppDbContext db,
+        int boardId,
+        CancellationToken cancellationToken)
+    {
+        return await db.CompareBoards
+            .AsNoTracking()
+            .Include(board => board.Suppliers)
+            .ThenInclude(boardSupplier => boardSupplier.Supplier)
+            .AsSplitQuery()
+            .FirstOrDefaultAsync(board => board.Id == boardId, cancellationToken);
+    }
+
+    private static CompareBoardResponse ToCompareBoardResponse(
+        CompareBoard board,
+        IReadOnlyList<Supplier> suppliersWithResearch)
+    {
+        var supplierOrder = board.Suppliers
+            .Where(boardSupplier => !boardSupplier.Supplier.IsArchived)
+            .OrderBy(boardSupplier => boardSupplier.SortOrder)
+            .ThenBy(boardSupplier => boardSupplier.AddedAt)
+            .ToList();
+        var selectedSuppliers = supplierOrder
+            .Select(boardSupplier => suppliersWithResearch.FirstOrDefault(supplier => supplier.Id == boardSupplier.SupplierId))
+            .Where(supplier => supplier is not null)
+            .Cast<Supplier>()
+            .ToList();
+
+        return new CompareBoardResponse(
+            board.Id,
+            board.Name,
+            board.CreatedAt,
+            board.UpdatedAt,
+            supplierOrder
+                .Select(boardSupplier => new CompareBoardSupplierResponse(
+                    boardSupplier.SupplierId,
+                    boardSupplier.Supplier.Name,
+                    boardSupplier.Supplier.CountryCode,
+                    boardSupplier.Supplier.Industry,
+                    boardSupplier.Supplier.WebsiteUrl,
+                    boardSupplier.SortOrder,
+                    boardSupplier.AddedAt))
+                .ToList(),
+            BuildSupplierComparison(selectedSuppliers, suppliersWithResearch));
+    }
+
+    private static string? NormalizeCompareBoardName(string value)
+    {
+        var name = value.Trim();
+
+        return string.IsNullOrWhiteSpace(name) || name.Length > 160
+            ? null
+            : name;
+    }
+
+    private static string BuildSupplierMarkdownReport(
+        Supplier supplier,
+        IReadOnlyList<SupplierConnectionResponse> connections)
+    {
+        var latestAssessment = supplier.RiskAssessments
+            .OrderByDescending(assessment => assessment.CreatedAt)
+            .FirstOrDefault();
+        var facts = supplier.SupplierFacts
+            .Where(fact => fact.FactType is not SupplierFactType.MissingEvidence and not SupplierFactType.SourceLimitation)
+            .OrderByDescending(fact => FactConfidenceScore(fact.Confidence))
+            .ThenByDescending(fact => fact.CreatedAt)
+            .ToList();
+        var reachableSourceCount = supplier.SourceChecks.Count(source => source.Status == SourceCheckStatus.Reachable);
+        var report = new StringBuilder();
+
+        report.AppendLine($"# {MarkdownText(supplier.Name)}");
+        report.AppendLine();
+        report.AppendLine($"- Country: {MarkdownText(supplier.CountryCode)}");
+        report.AppendLine($"- Industry: {MarkdownText(supplier.Industry)}");
+        report.AppendLine($"- Website: {(string.IsNullOrWhiteSpace(supplier.WebsiteUrl) ? "Not provided" : MarkdownText(supplier.WebsiteUrl))}");
+        report.AppendLine($"- Exported: {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC");
+        report.AppendLine();
+
+        report.AppendLine("## Briefing Summary");
+        report.AppendLine();
+        report.AppendLine(MarkdownText(BuildComparisonCompanySummary(supplier, latestAssessment, facts)));
+        report.AppendLine();
+
+        AppendMarkdownList(
+            report,
+            "## Products / Services",
+            BuildComparisonFactItems(facts, SupplierFactType.ProductsAndServices));
+        AppendMarkdownList(
+            report,
+            "## Locations / Markets",
+            BuildComparisonLocationItems(supplier, facts));
+        AppendMarkdownList(
+            report,
+            "## Useful Facts",
+            facts
+                .Select(fact => $"{FormatFactType(fact.FactType)}: {ShortenText(CleanComparisonText(fact.Value), 220)}")
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(8)
+                .ToList());
+
+        report.AppendLine("## Useful Sources");
+        report.AppendLine();
+        var sources = BuildComparisonSources(supplier);
+        if (sources.Count == 0)
+        {
+            report.AppendLine("- No sources stored yet.");
+        }
+        else
+        {
+            foreach (var source in sources)
+            {
+                report.AppendLine($"- {MarkdownText(source.SourceName)} ({MarkdownText(source.Status)}): {MarkdownText(source.Url)}");
+                if (!string.IsNullOrWhiteSpace(source.Summary))
+                {
+                    report.AppendLine($"  - {MarkdownText(source.Summary)}");
+                }
+            }
+        }
+        report.AppendLine();
+
+        AppendMarkdownList(
+            report,
+            "## Open Gaps",
+            BuildComparisonOpenQuestions(supplier, latestAssessment, facts, reachableSourceCount));
+        AppendMarkdownList(
+            report,
+            "## Related Suppliers",
+            connections
+                .Take(8)
+                .Select(connection => $"{connection.SupplierName} ({connection.CountryCode} · {connection.Industry}) - {connection.StrengthLabel}: {string.Join("; ", connection.Reasons.Take(2))}")
+                .ToList());
+
+        report.AppendLine("## Analysis Runs");
+        report.AppendLine();
+        var analysisJobs = supplier.AnalysisJobs
+            .OrderByDescending(job => job.CreatedAt)
+            .Take(6)
+            .ToList();
+        if (analysisJobs.Count == 0)
+        {
+            report.AppendLine("- No analysis jobs stored.");
+        }
+        else
+        {
+            foreach (var job in analysisJobs)
+            {
+                report.AppendLine($"- {job.CreatedAt:yyyy-MM-dd HH:mm}: {job.Status} / {job.JobType} - {MarkdownText(job.ProgressMessage)}");
+                if (!string.IsNullOrWhiteSpace(job.ErrorMessage))
+                {
+                    report.AppendLine($"  - Error: {MarkdownText(job.ErrorMessage)}");
+                }
+            }
+        }
+
+        return report.ToString();
+    }
+
+    private static void AppendMarkdownList(
+        StringBuilder report,
+        string title,
+        IReadOnlyList<string> items)
+    {
+        report.AppendLine(title);
+        report.AppendLine();
+
+        if (items.Count == 0)
+        {
+            report.AppendLine("- No stored information yet.");
+        }
+        else
+        {
+            foreach (var item in items)
+            {
+                report.AppendLine($"- {MarkdownText(item)}");
+            }
+        }
+
+        report.AppendLine();
+    }
+
+    private static string MarkdownText(string value)
+    {
+        return string.IsNullOrWhiteSpace(value)
+            ? "Not available"
+            : value.Replace("\r", " ").Replace("\n", " ").Trim();
+    }
+
+    private static string SlugifyFileName(string value)
+    {
+        var slug = new string(value
+            .ToLowerInvariant()
+            .Select(character => char.IsLetterOrDigit(character) ? character : '-')
+            .ToArray())
+            .Trim('-');
+
+        while (slug.Contains("--", StringComparison.Ordinal))
+        {
+            slug = slug.Replace("--", "-", StringComparison.Ordinal);
+        }
+
+        return string.IsNullOrWhiteSpace(slug) ? "supplier" : slug;
+    }
+
+    private static SupplierComparisonItemResponse BuildSupplierComparisonItem(
+        Supplier supplier,
+        int relatedSupplierCount)
+    {
+        var reachableSourceCount = supplier.SourceChecks.Count(source => source.Status == SourceCheckStatus.Reachable);
+        var failedSourceCount = supplier.SourceChecks.Count(source =>
+            source.Status is SourceCheckStatus.Blocked or SourceCheckStatus.Failed);
+        var latestAssessment = supplier.RiskAssessments
+            .OrderByDescending(assessment => assessment.CreatedAt)
+            .FirstOrDefault();
+        var facts = supplier.SupplierFacts
+            .Where(fact => fact.FactType is not SupplierFactType.MissingEvidence and not SupplierFactType.SourceLimitation)
+            .OrderByDescending(fact => FactConfidenceScore(fact.Confidence))
+            .ThenByDescending(fact => fact.CreatedAt)
+            .ToList();
+
+        return new SupplierComparisonItemResponse(
+            supplier.Id,
+            supplier.Name,
+            supplier.CountryCode,
+            supplier.Industry,
+            supplier.WebsiteUrl,
+            BuildComparisonCompanySummary(supplier, latestAssessment, facts),
+            BuildComparisonFactItems(facts, SupplierFactType.ProductsAndServices),
+            BuildComparisonLocationItems(supplier, facts),
+            reachableSourceCount,
+            failedSourceCount,
+            BuildComparisonSources(supplier),
+            facts
+                .Select(fact => $"{FormatFactType(fact.FactType)}: {ShortenText(fact.Value, 180)}")
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(6)
+                .ToList(),
+            BuildComparisonOpenQuestions(supplier, latestAssessment, facts, reachableSourceCount),
+            relatedSupplierCount);
+    }
+
+    private static string BuildComparisonCompanySummary(
+        Supplier supplier,
+        RiskAssessment? latestAssessment,
+        IReadOnlyList<SupplierFact> facts)
+    {
+        var description = facts
+            .Where(fact => fact.FactType is SupplierFactType.CompanyDescription or SupplierFactType.IndustryProfile)
+            .Select(fact => fact.Value)
+            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+
+        if (!string.IsNullOrWhiteSpace(description))
+        {
+            return ShortenText(CleanComparisonText(description), 260);
+        }
+
+        if (!string.IsNullOrWhiteSpace(latestAssessment?.SummaryMarkdown))
+        {
+            return ShortenText(CleanComparisonText(latestAssessment.SummaryMarkdown), 260);
+        }
+
+        return $"{supplier.Name} is tracked as a supplier in {supplier.Industry} for country {supplier.CountryCode}.";
+    }
+
+    private static List<string> BuildComparisonFactItems(
+        IReadOnlyList<SupplierFact> facts,
+        params SupplierFactType[] factTypes)
+    {
+        var allowedTypes = factTypes.ToHashSet();
+
+        return facts
+            .Where(fact => allowedTypes.Contains(fact.FactType))
+            .Select(fact => ShortenText(CleanComparisonText(fact.Value), 150))
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(4)
+            .ToList();
+    }
+
+    private static List<string> BuildComparisonLocationItems(
+        Supplier supplier,
+        IReadOnlyList<SupplierFact> facts)
+    {
+        var items = BuildComparisonFactItems(
+            facts,
+            SupplierFactType.LocationsAndMarkets,
+            SupplierFactType.LegalIdentity,
+            SupplierFactType.RegistryEvidence);
+
+        if (items.Count == 0)
+        {
+            items.Add($"{supplier.CountryCode} · {supplier.Industry}");
+        }
+
+        return items.Take(4).ToList();
+    }
+
+    private static List<SupplierComparisonSourceResponse> BuildComparisonSources(Supplier supplier)
+    {
+        var sourceChecks = supplier.SourceChecks
+            .OrderBy(source => source.Status == SourceCheckStatus.Reachable ? 0 : 1)
+            .ThenByDescending(source => source.CheckedAt)
+            .Take(4)
+            .Select(source => new SupplierComparisonSourceResponse(
+                source.SourceName,
+                source.Url,
+                source.Status.ToString(),
+                ShortenText(CleanComparisonText(source.Notes), 170)))
+            .ToList();
+
+        if (sourceChecks.Count > 0)
+        {
+            return sourceChecks;
+        }
+
+        return supplier.ResearchSources
+            .OrderByDescending(source => FactConfidenceScore(source.Relevance))
+            .ThenByDescending(source => source.CreatedAt)
+            .Take(4)
+            .Select(source => new SupplierComparisonSourceResponse(
+                source.SourceName,
+                source.Url,
+                source.Status.ToString(),
+                ShortenText(CleanComparisonText(source.Summary), 170)))
+            .ToList();
+    }
+
+    private static List<string> BuildComparisonOpenQuestions(
+        Supplier supplier,
+        RiskAssessment? latestAssessment,
+        IReadOnlyList<SupplierFact> facts,
+        int reachableSourceCount)
+    {
+        var questions = new List<string>();
+
+        if (reachableSourceCount == 0)
+        {
+            questions.Add("No reachable public source is stored yet.");
+        }
+
+        if (!supplier.SupplierFacts.Any(fact => fact.FactType == SupplierFactType.CompanyDescription))
+        {
+            questions.Add("Company description still needs stronger source support.");
+        }
+
+        if (!facts.Any(fact => fact.FactType == SupplierFactType.ProductsAndServices))
+        {
+            questions.Add("Products or services are not clearly extracted yet.");
+        }
+
+        if (latestAssessment is null)
+        {
+            questions.Add("No research memo has been generated yet.");
+        }
+
+        questions.AddRange(supplier.SupplierFacts
+            .Where(fact => fact.FactType is SupplierFactType.MissingEvidence or SupplierFactType.SourceLimitation)
+            .OrderByDescending(fact => fact.CreatedAt)
+            .Select(fact => ShortenText(CleanComparisonText(fact.Value), 150)));
+
+        return questions
+            .Where(question => !string.IsNullOrWhiteSpace(question))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(5)
+            .ToList();
+    }
+
+    private static int FactConfidenceScore(FactConfidence confidence)
+    {
+        return confidence switch
+        {
+            FactConfidence.High => 3,
+            FactConfidence.Medium => 2,
+            _ => 1
+        };
+    }
+
+    private static string CleanComparisonText(string value)
+    {
+        return value
+            .Replace("**", string.Empty)
+            .Replace("\r", " ")
+            .Replace("\n", " ")
+            .Replace("  ", " ")
+            .Trim(' ', '-', '•');
     }
 
     private static HashSet<string> ExtractSupplierConnectionTerms(Supplier supplier)
