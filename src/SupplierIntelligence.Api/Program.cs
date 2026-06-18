@@ -56,6 +56,7 @@ builder.Services.AddSingleton<ICertificationVerificationConnector, LocalLearning
 builder.Services.AddSingleton<ICertificationVerificationConnector, RuleBasedCertificationFallbackConnector>();
 builder.Services.AddSingleton<ICertificationVerifier, CompositeCertificationVerifier>();
 builder.Services.AddSingleton<ISupplierAnalysisQueue, ChannelSupplierAnalysisQueue>();
+builder.Services.AddSingleton<OpenRouterRuntimeSettings>();
 builder.Services.AddHostedService<AdaptiveSupplierAnalysisWorker>();
 
 builder.Services.ConfigureHttpJsonOptions(options =>

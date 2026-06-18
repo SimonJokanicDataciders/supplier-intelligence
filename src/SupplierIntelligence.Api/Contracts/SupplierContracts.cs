@@ -12,6 +12,8 @@ public sealed record CreateSupplierRequest(
     string? CertificationHints,
     bool RunInitialAnalysis);
 
+public sealed record UpdateSupplierIndustryRequest(string Industry);
+
 public sealed record AddCertificationRequest(
     string Standard,
     string CertificateNumber,
@@ -31,9 +33,29 @@ public sealed record AddSourceCheckRequest(
     SourceCheckStatus Status,
     string Notes);
 
+public sealed record UpdateSourceCheckRequest(
+    string SourceName,
+    string Url,
+    SourceCheckStatus Status,
+    string Notes);
+
 public sealed record CheckSourceEvidenceRequest(
     string SourceName,
     string Url);
+
+public sealed record ResearchWebsiteSourceRequest(string Url);
+
+public sealed record RecheckOpenQuestionsRequest(IReadOnlyList<string> Questions);
+
+public sealed record RecheckOpenQuestionsResponse(
+    IReadOnlyList<OpenQuestionResolutionResponse> Resolved,
+    IReadOnlyList<OpenQuestionResolutionResponse> Unresolved);
+
+public sealed record OpenQuestionResolutionResponse(
+    string Question,
+    string Status,
+    string EvidenceNote,
+    string SourceName);
 
 public sealed record CreateSupplierMatchCandidateRequest(
     string CandidateName,
@@ -144,6 +166,16 @@ public sealed record SupplierAnalyticsResponse(
     IReadOnlyList<TimelineItemResponse> Timeline,
     IReadOnlyList<string> StrongestSignals,
     IReadOnlyList<string> WeakestGaps);
+
+public sealed record SupplierConnectionResponse(
+    int SupplierId,
+    string SupplierName,
+    string CountryCode,
+    string Industry,
+    string? WebsiteUrl,
+    string StrengthLabel,
+    IReadOnlyList<string> Reasons,
+    IReadOnlyList<string> SharedTerms);
 
 public sealed record TrustBreakdownItemResponse(
     string Label,

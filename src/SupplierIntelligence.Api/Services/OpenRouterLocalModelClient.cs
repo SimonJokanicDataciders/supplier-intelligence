@@ -10,7 +10,8 @@ namespace SupplierIntelligence.Api.Services;
 
 public sealed class OpenRouterLocalModelClient(
     HttpClient httpClient,
-    IOptions<LocalModelOptions> options) : ILocalModelClient
+    IOptions<LocalModelOptions> options,
+    OpenRouterRuntimeSettings runtimeSettings) : ILocalModelClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly LocalModelOptions options = options.Value;
@@ -156,18 +157,28 @@ public sealed class OpenRouterLocalModelClient(
 
     private void EnsureConfigured()
     {
-        var apiKey = string.IsNullOrWhiteSpace(options.ApiKey)
-            ? Environment.GetEnvironmentVariable("OPENROUTER_API_KEY")
-            : options.ApiKey;
+        var apiKey = ResolveApiKey();
 
         if (string.IsNullOrWhiteSpace(apiKey))
         {
-            throw new LocalModelException("OpenRouter is selected, but no API key is configured. Set LocalModel:ApiKey or OPENROUTER_API_KEY.");
+            throw new LocalModelException("OpenRouter is selected, but no runtime API key is configured. Paste a key in Technical details and save it for this run.");
         }
+
+        httpClient.DefaultRequestHeaders.Authorization = null;
+        httpClient.DefaultRequestHeaders.Remove("HTTP-Referer");
+        httpClient.DefaultRequestHeaders.Remove("X-OpenRouter-Title");
 
         httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
         httpClient.DefaultRequestHeaders.TryAddWithoutValidation("HTTP-Referer", "http://localhost");
         httpClient.DefaultRequestHeaders.TryAddWithoutValidation("X-OpenRouter-Title", "Supplier Intelligence Learning App");
+    }
+
+    private string? ResolveApiKey()
+    {
+        var runtimeApiKey = runtimeSettings.GetSnapshot().ApiKey;
+        return string.IsNullOrWhiteSpace(runtimeApiKey)
+            ? null
+            : OpenRouterRuntimeSettings.SanitizeApiKey(runtimeApiKey);
     }
 
     private static bool IsOllamaDefault(string model)

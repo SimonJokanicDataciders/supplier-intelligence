@@ -1,8 +1,11 @@
 using System.Diagnostics;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using SupplierIntelligence.Api.Contracts;
 using SupplierIntelligence.Api.Data;
 using SupplierIntelligence.Api.Models;
+using SupplierIntelligence.Api.Options;
 using SupplierIntelligence.Api.Services;
 
 namespace SupplierIntelligence.Api.Endpoints;
@@ -101,6 +104,7 @@ public static class SupplierEndpoints
                 .AsNoTracking()
                 .Include(s => s.Certifications)
                 .Include(s => s.SourceChecks)
+                .Include(s => s.SupplierFacts)
                 .Include(s => s.RiskAssessments)
                 .Include(s => s.MatchCandidates)
                 .AsSplitQuery()
@@ -115,6 +119,30 @@ public static class SupplierEndpoints
         .WithSummary("Get supplier review summary")
         .WithDescription("Returns a generic review summary for the selected supplier: next action, known information, missing information, and trust signals.")
         .WithName("GetSupplierReviewSummary");
+
+        suppliers.MapGet("/{id:int}/connections", async (
+            int id,
+            AppDbContext db,
+            CancellationToken cancellationToken) =>
+        {
+            var suppliersWithResearch = await db.Suppliers
+                .AsNoTracking()
+                .Include(s => s.SourceChecks)
+                .Include(s => s.SupplierFacts)
+                .Where(s => !s.IsArchived)
+                .AsSplitQuery()
+                .ToListAsync(cancellationToken);
+            var supplier = suppliersWithResearch.FirstOrDefault(s => s.Id == id);
+
+            return supplier is null
+                ? Results.NotFound()
+                : Results.Ok(BuildSupplierConnections(supplier, suppliersWithResearch));
+        })
+        .Produces<List<SupplierConnectionResponse>>()
+        .Produces(StatusCodes.Status404NotFound)
+        .WithSummary("Get supplier connections")
+        .WithDescription("Returns research-based supplier similarities from shared country, industry, source hosts, and extracted fact terms.")
+        .WithName("GetSupplierConnections");
 
         suppliers.MapGet("/{id:int}/analytics", async (
             int id,
@@ -204,6 +232,35 @@ public static class SupplierEndpoints
         .WithSummary("Create supplier")
         .WithDescription("Creates a supplier record that can later receive certifications, source checks, and risk assessments.")
         .WithName("CreateSupplier");
+
+        suppliers.MapPatch("/{id:int}/industry", async (
+            int id,
+            UpdateSupplierIndustryRequest request,
+            AppDbContext db,
+            CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Industry))
+            {
+                return Results.BadRequest(new { error = "Industry is required." });
+            }
+
+            var supplier = await db.Suppliers.FirstOrDefaultAsync(s => s.Id == id, cancellationToken);
+            if (supplier is null)
+            {
+                return Results.NotFound();
+            }
+
+            supplier.Industry = request.Industry.Trim();
+            await db.SaveChangesAsync(cancellationToken);
+
+            return Results.Ok(ToDetailResponse(supplier));
+        })
+        .Produces<SupplierDetailResponse>()
+        .Produces(StatusCodes.Status400BadRequest)
+        .Produces(StatusCodes.Status404NotFound)
+        .WithSummary("Update supplier industry")
+        .WithDescription("Moves a supplier into another sidebar industry folder.")
+        .WithName("UpdateSupplierIndustry");
 
         suppliers.MapPost("/{id:int}/archive", async (
             int id,
@@ -646,6 +703,63 @@ public static class SupplierEndpoints
         .WithDescription("Scans the supplier website for common certification claims and stores discovered unverified certification evidence.")
         .WithName("DiscoverSupplierCertificationsFromWebsite");
 
+        suppliers.MapPost("/{supplierId:int}/open-questions/recheck", async (
+            int supplierId,
+            RecheckOpenQuestionsRequest request,
+            AppDbContext db,
+            ILocalModelClient localModel,
+            IOptions<LocalModelOptions> localModelOptions,
+            CancellationToken cancellationToken) =>
+        {
+            var questions = request.Questions
+                .Select(question => question.Trim())
+                .Where(question => !string.IsNullOrWhiteSpace(question))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(12)
+                .ToList();
+            if (questions.Count == 0)
+            {
+                return Results.BadRequest(new { error = "At least one open question is required." });
+            }
+
+            var supplier = await db.Suppliers
+                .AsNoTracking()
+                .Include(s => s.SourceChecks)
+                .Include(s => s.SupplierFacts)
+                .FirstOrDefaultAsync(s => s.Id == supplierId, cancellationToken);
+            if (supplier is null)
+            {
+                return Results.NotFound();
+            }
+
+            var evidence = BuildOpenQuestionEvidence(supplier, questions);
+            try
+            {
+                var modelResponse = await localModel.ChatAsync(
+                    localModelOptions.Value.Model,
+                    BuildOpenQuestionRecheckSystemPrompt(),
+                    JsonSerializer.Serialize(evidence),
+                    cancellationToken);
+                var response = ParseOpenQuestionRecheckResponse(modelResponse, questions);
+
+                return Results.Ok(response);
+            }
+            catch (LocalModelException exception)
+            {
+                return Results.Problem(
+                    title: "Open question recheck failed",
+                    detail: exception.Message,
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+        })
+        .Produces<RecheckOpenQuestionsResponse>()
+        .Produces(StatusCodes.Status400BadRequest)
+        .Produces(StatusCodes.Status404NotFound)
+        .Produces(StatusCodes.Status503ServiceUnavailable)
+        .WithSummary("Recheck supplier open questions")
+        .WithDescription("Uses the configured model to resolve open questions from already stored supplier facts and source checks.")
+        .WithName("RecheckSupplierOpenQuestions");
+
         suppliers.MapPost("/{supplierId:int}/source-checks", async (
             int supplierId,
             AddSourceCheckRequest request,
@@ -685,6 +799,102 @@ public static class SupplierEndpoints
         .WithSummary("Add supplier source check")
         .WithDescription("Adds a source-check record for supplier evidence, such as a reachable company website or blocked source.")
         .WithName("AddSupplierSourceCheck");
+
+        suppliers.MapPut("/{supplierId:int}/source-checks/{sourceCheckId:int}", async (
+            int supplierId,
+            int sourceCheckId,
+            UpdateSourceCheckRequest request,
+            AppDbContext db,
+            IResearchFactExtractor researchFactExtractor,
+            CancellationToken cancellationToken) =>
+        {
+            var sourceCheck = await db.SourceChecks
+                .FirstOrDefaultAsync(
+                    source => source.Id == sourceCheckId && source.SupplierId == supplierId,
+                    cancellationToken);
+            if (sourceCheck is null)
+            {
+                return Results.NotFound();
+            }
+
+            var validationError = ValidateSourceCheckRequest(new AddSourceCheckRequest(
+                request.SourceName,
+                request.Url,
+                request.Status,
+                request.Notes));
+            if (validationError is not null)
+            {
+                return Results.BadRequest(new { error = validationError });
+            }
+
+            sourceCheck.SourceName = request.SourceName.Trim();
+            sourceCheck.Url = request.Url.Trim();
+            sourceCheck.Status = request.Status;
+            sourceCheck.Notes = request.Notes.Trim();
+            sourceCheck.CheckedAt = DateTime.UtcNow;
+
+            var supplier = await LoadSupplierForFactRefreshAsync(db, supplierId, cancellationToken);
+            if (supplier is not null)
+            {
+                await researchFactExtractor.RefreshFactsAsync(supplier, db, cancellationToken);
+            }
+
+            await db.SaveChangesAsync(cancellationToken);
+
+            return Results.Ok(ToSourceCheckResponse(sourceCheck));
+        })
+        .Produces<SourceCheckResponse>()
+        .Produces(StatusCodes.Status400BadRequest)
+        .Produces(StatusCodes.Status404NotFound)
+        .WithSummary("Update supplier source check")
+        .WithDescription("Updates a stored source-check record and refreshes extracted supplier facts.")
+        .WithName("UpdateSupplierSourceCheck");
+
+        suppliers.MapDelete("/{supplierId:int}/source-checks/{sourceCheckId:int}", async (
+            int supplierId,
+            int sourceCheckId,
+            AppDbContext db,
+            IResearchFactExtractor researchFactExtractor,
+            CancellationToken cancellationToken) =>
+        {
+            var sourceCheck = await db.SourceChecks
+                .FirstOrDefaultAsync(
+                    source => source.Id == sourceCheckId && source.SupplierId == supplierId,
+                    cancellationToken);
+            if (sourceCheck is null)
+            {
+                return Results.NotFound();
+            }
+
+            var linkedResearchSourceIds = await db.ResearchSources
+                .Where(source => source.SourceCheckId == sourceCheckId)
+                .Select(source => source.Id)
+                .ToListAsync(cancellationToken);
+            var linkedFacts = await db.SupplierFacts
+                .Where(fact => fact.ResearchSourceId.HasValue && linkedResearchSourceIds.Contains(fact.ResearchSourceId.Value))
+                .ToListAsync(cancellationToken);
+            var linkedResearchSources = await db.ResearchSources
+                .Where(source => source.SourceCheckId == sourceCheckId)
+                .ToListAsync(cancellationToken);
+
+            db.SupplierFacts.RemoveRange(linkedFacts);
+            db.ResearchSources.RemoveRange(linkedResearchSources);
+            db.SourceChecks.Remove(sourceCheck);
+            await db.SaveChangesAsync(cancellationToken);
+
+            var supplier = await LoadSupplierForFactRefreshAsync(db, supplierId, cancellationToken);
+            if (supplier is not null)
+            {
+                await researchFactExtractor.RefreshFactsAsync(supplier, db, cancellationToken);
+            }
+
+            return Results.NoContent();
+        })
+        .Produces(StatusCodes.Status204NoContent)
+        .Produces(StatusCodes.Status404NotFound)
+        .WithSummary("Delete supplier source check")
+        .WithDescription("Deletes one source check and removes extracted facts tied to that source.")
+        .WithName("DeleteSupplierSourceCheck");
 
         suppliers.MapPost("/{supplierId:int}/source-checks/check", async (
             int supplierId,
@@ -728,6 +938,49 @@ public static class SupplierEndpoints
         .WithSummary("Check and add supplier source evidence")
         .WithDescription("Checks a source URL from the C# API, maps the result to a source-check status, and stores the evidence record.")
         .WithName("CheckSupplierSourceEvidence");
+
+        suppliers.MapPost("/{supplierId:int}/source-checks/research-website", async (
+            int supplierId,
+            ResearchWebsiteSourceRequest request,
+            AppDbContext db,
+            IWebsiteResearcher websiteResearcher,
+            IResearchFactExtractor researchFactExtractor,
+            CancellationToken cancellationToken) =>
+        {
+            if (!Uri.TryCreate(request.Url.Trim(), UriKind.Absolute, out var websiteUrl) ||
+                websiteUrl.Scheme is not ("http" or "https"))
+            {
+                return Results.BadRequest(new { error = "Url must be an absolute http or https URL." });
+            }
+
+            var supplier = await db.Suppliers
+                .Include(s => s.Certifications)
+                .Include(s => s.SourceChecks)
+                .Include(s => s.ResearchSources)
+                .Include(s => s.SupplierFacts)
+                .FirstOrDefaultAsync(s => s.Id == supplierId, cancellationToken);
+            if (supplier is null)
+            {
+                return Results.NotFound();
+            }
+
+            var research = await websiteResearcher.ResearchAsync(websiteUrl, cancellationToken);
+            var sourceChecks = AddWebsiteResearchSourceChecks(supplier, research);
+            if (sourceChecks.Count > 0)
+            {
+                await db.SaveChangesAsync(cancellationToken);
+            }
+
+            await researchFactExtractor.RefreshFactsAsync(supplier, db, cancellationToken);
+
+            return Results.Ok(sourceChecks.Select(ToSourceCheckResponse).ToList());
+        })
+        .Produces<List<SourceCheckResponse>>()
+        .Produces(StatusCodes.Status400BadRequest)
+        .Produces(StatusCodes.Status404NotFound)
+        .WithSummary("Research website source")
+        .WithDescription("Researches a website URL, stores discovered pages as source checks, and refreshes supplier facts.")
+        .WithName("ResearchWebsiteSource");
 
         return app;
     }
@@ -1239,46 +1492,276 @@ public static class SupplierEndpoints
             .OrderByDescending(candidate => candidate.ReviewedAt ?? candidate.CreatedAt)
             .FirstOrDefault();
         var reachableSourceCount = supplier.SourceChecks.Count(source => source.Status == SourceCheckStatus.Reachable);
-        var verifiedCertificationCount = supplier.Certifications.Count(certification => certification.IsVerified);
+        var failedSourceCount = supplier.SourceChecks.Count(source => source.Status is SourceCheckStatus.Blocked or SourceCheckStatus.Failed);
         var hasRegistrationEvidence = supplier.SourceChecks.Any(source =>
             source.Status == SourceCheckStatus.Reachable &&
             IsRegistrationEvidence(source));
-        var hasCertificationEvidence = supplier.SourceChecks.Any(source =>
-            source.Status == SourceCheckStatus.Reachable &&
-            IsCertificationEvidence(source)) || verifiedCertificationCount > 0;
         var missingInformation = BuildMissingInformation(
-            confirmedIdentity,
             reachableSourceCount,
-            verifiedCertificationCount,
+            failedSourceCount,
             hasRegistrationEvidence,
-            hasCertificationEvidence);
+            supplier.SupplierFacts.Count);
         var knownInformation = BuildKnownInformation(
             supplier,
             confirmedIdentity,
             latestAssessment,
             reachableSourceCount,
-            verifiedCertificationCount,
-            hasRegistrationEvidence,
-            hasCertificationEvidence);
+            hasRegistrationEvidence);
         var trustSignals = new SupplierTrustSignalsResponse(
-            confirmedIdentity is null ? "Needs review" : "Confirmed",
+            supplier.SupplierFacts.Count > 0 ? $"{supplier.SupplierFacts.Count} facts" : "No facts yet",
             reachableSourceCount == 0 ? "Missing" : reachableSourceCount >= 3 ? "Good" : "Partial",
-            verifiedCertificationCount > 0 ? "Verified" : hasCertificationEvidence ? "Claimed" : "Missing",
-            latestAssessment is null ? "Not assessed" : latestAssessment.RiskLevel.ToString());
+            failedSourceCount == 0 ? "No blockers" : $"{failedSourceCount} blocked",
+            hasRegistrationEvidence ? "Company source found" : "Company source unclear");
         var nextAction = BuildReviewNextAction(
-            confirmedIdentity,
             missingInformation,
             latestAssessment);
 
         return new SupplierReviewSummaryResponse(
             supplier.Id,
             supplier.Name,
-            BuildReviewHeadline(confirmedIdentity, missingInformation, latestAssessment),
+            BuildReviewHeadline(reachableSourceCount, missingInformation, latestAssessment),
             nextAction,
             knownInformation,
             missingInformation,
             trustSignals);
     }
+
+    private static List<SupplierConnectionResponse> BuildSupplierConnections(
+        Supplier supplier,
+        IReadOnlyList<Supplier> suppliers)
+    {
+        var currentTerms = ExtractSupplierConnectionTerms(supplier);
+        var currentHosts = ExtractSourceHosts(supplier);
+
+        return suppliers
+            .Where(other => other.Id != supplier.Id && !IsDevelopmentSupplier(other))
+            .Select(other =>
+            {
+                var reasons = new List<string>();
+                var sharedTerms = currentTerms
+                    .Intersect(ExtractSupplierConnectionTerms(other), StringComparer.OrdinalIgnoreCase)
+                    .Take(6)
+                    .ToList();
+                var sharedHosts = currentHosts
+                    .Intersect(ExtractSourceHosts(other), StringComparer.OrdinalIgnoreCase)
+                    .Take(3)
+                    .ToList();
+                var score = 0;
+
+                if (supplier.CountryCode.Equals(other.CountryCode, StringComparison.OrdinalIgnoreCase))
+                {
+                    reasons.Add($"Same country: {other.CountryCode}");
+                }
+
+                if (supplier.Industry.Equals(other.Industry, StringComparison.OrdinalIgnoreCase))
+                {
+                    reasons.Add($"Same industry: {other.Industry}");
+                }
+
+                if (sharedTerms.Count > 0)
+                {
+                    score += Math.Min(60, sharedTerms.Count * 12);
+                    reasons.Add($"Shared research terms: {string.Join(", ", sharedTerms.Take(3))}");
+                }
+
+                if (sharedHosts.Count > 0)
+                {
+                    score += Math.Min(40, sharedHosts.Count * 20);
+                    reasons.Add($"Shared source host: {string.Join(", ", sharedHosts)}");
+                }
+
+                if (score > 0 &&
+                    supplier.CountryCode.Equals(other.CountryCode, StringComparison.OrdinalIgnoreCase))
+                {
+                    score += 10;
+                }
+
+                if (score > 0 &&
+                    supplier.Industry.Equals(other.Industry, StringComparison.OrdinalIgnoreCase))
+                {
+                    score += 15;
+                }
+
+                return new
+                {
+                    Supplier = other,
+                    Score = score,
+                    Reasons = reasons,
+                    SharedTerms = sharedTerms
+                };
+            })
+            .Where(connection => connection.Score >= 35)
+            .OrderByDescending(connection => connection.Score)
+            .ThenBy(connection => connection.Supplier.Name)
+            .Take(8)
+            .Select(connection => new SupplierConnectionResponse(
+                connection.Supplier.Id,
+                connection.Supplier.Name,
+                connection.Supplier.CountryCode,
+                connection.Supplier.Industry,
+                connection.Supplier.WebsiteUrl,
+                FormatConnectionStrength(connection.Score),
+                connection.Reasons,
+                connection.SharedTerms))
+            .ToList();
+    }
+
+    private static HashSet<string> ExtractSupplierConnectionTerms(Supplier supplier)
+    {
+        var terms = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        AddConnectionTerms(terms, supplier.Name);
+        AddConnectionTerms(terms, supplier.Industry);
+
+        foreach (var fact in supplier.SupplierFacts)
+        {
+            if (fact.FactType is SupplierFactType.MissingEvidence or SupplierFactType.SourceLimitation)
+            {
+                continue;
+            }
+
+            AddConnectionTerms(terms, fact.Value);
+        }
+
+        foreach (var source in supplier.SourceChecks)
+        {
+            AddConnectionTerms(terms, source.Notes);
+        }
+
+        return terms;
+    }
+
+    private static void AddConnectionTerms(HashSet<string> terms, string value)
+    {
+        foreach (var part in value.Split(new[] { ' ', '\t', '\r', '\n', ',', '.', ';', ':', '/', '\\', '-', '_', '(', ')', '[', ']', '{', '}', '"' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var term = part.Trim().ToLowerInvariant();
+            if (term.Length < 4 ||
+                int.TryParse(term, out _) ||
+                ConnectionStopWords.Contains(term))
+            {
+                continue;
+            }
+
+            terms.Add(term);
+        }
+    }
+
+    private static HashSet<string> ExtractSourceHosts(Supplier supplier)
+    {
+        return supplier.SourceChecks
+            .Select(source => FormatHost(source.Url))
+            .Where(host => !string.IsNullOrWhiteSpace(host))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static bool IsDevelopmentSupplier(Supplier supplier)
+    {
+        var website = supplier.WebsiteUrl ?? string.Empty;
+
+        return ContainsDevelopmentMarker(supplier.Name) ||
+            website.Contains("127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
+            website.Contains("localhost", StringComparison.OrdinalIgnoreCase) ||
+            website.Contains("example.com", StringComparison.OrdinalIgnoreCase) ||
+            website.Contains("learning-demo", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task<Supplier?> LoadSupplierForFactRefreshAsync(
+        AppDbContext db,
+        int supplierId,
+        CancellationToken cancellationToken)
+    {
+        return await db.Suppliers
+            .Include(s => s.Certifications)
+            .Include(s => s.SourceChecks)
+            .Include(s => s.ResearchSources)
+            .Include(s => s.SupplierFacts)
+            .FirstOrDefaultAsync(s => s.Id == supplierId, cancellationToken);
+    }
+
+    private static List<SourceCheck> AddWebsiteResearchSourceChecks(
+        Supplier supplier,
+        WebsiteResearchResult research)
+    {
+        var sourceChecks = new List<SourceCheck>();
+
+        foreach (var page in research.Pages)
+        {
+            var alreadyExists = supplier.SourceChecks.Any(sourceCheck =>
+                sourceCheck.Url.Equals(page.Url, StringComparison.OrdinalIgnoreCase) &&
+                sourceCheck.SourceName.StartsWith("Website research", StringComparison.OrdinalIgnoreCase));
+
+            if (alreadyExists)
+            {
+                continue;
+            }
+
+            var sourceCheck = new SourceCheck
+            {
+                SupplierId = supplier.Id,
+                SourceName = $"Website research: {page.PageType}",
+                Url = page.Url,
+                Status = SourceCheckStatus.Reachable,
+                Notes = BuildWebsiteResearchNotes(page)
+            };
+
+            supplier.SourceChecks.Add(sourceCheck);
+            sourceChecks.Add(sourceCheck);
+        }
+
+        return sourceChecks;
+    }
+
+    private static string BuildWebsiteResearchNotes(WebsiteResearchPage page)
+    {
+        var terms = page.MatchedTerms.Count == 0
+            ? "No certification or compliance terms found."
+            : $"Matched terms: {string.Join(", ", page.MatchedTerms)}.";
+
+        var notes = $"Title: {page.Title}. Description: {page.Description}. {terms} Text: {page.TextSnippet}";
+        return notes.Length <= 2200
+            ? notes
+            : notes[..2197] + "...";
+    }
+
+    private static string FormatConnectionStrength(int score)
+    {
+        return score switch
+        {
+            >= 70 => "Strong similarity",
+            >= 40 => "Useful similarity",
+            _ => "Light similarity"
+        };
+    }
+
+    private static readonly HashSet<string> ConnectionStopWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "about",
+        "after",
+        "also",
+        "and",
+        "are",
+        "available",
+        "based",
+        "been",
+        "business",
+        "company",
+        "evidence",
+        "from",
+        "have",
+        "http",
+        "https",
+        "information",
+        "into",
+        "limited",
+        "notes",
+        "public",
+        "source",
+        "supplier",
+        "their",
+        "this",
+        "with"
+    };
 
     private static SupplierAnalyticsResponse BuildAnalytics(Supplier supplier)
     {
@@ -1314,14 +1797,12 @@ public static class SupplierEndpoints
             supplier,
             confirmedIdentity,
             reachableSources,
-            verifiedCertifications,
             hasRegistrationEvidence,
             latestAssessment);
         var weakestGaps = BuildAnalyticsGaps(
             confirmedIdentity,
             reachableSources,
             failedSources,
-            verifiedCertifications,
             hasRegistrationEvidence,
             latestAssessment);
 
@@ -1335,6 +1816,148 @@ public static class SupplierEndpoints
             strongestSignals,
             weakestGaps);
     }
+
+    private static object BuildOpenQuestionEvidence(Supplier supplier, IReadOnlyList<string> questions)
+    {
+        return new
+        {
+            supplier = new
+            {
+                supplier.Id,
+                supplier.Name,
+                supplier.CountryCode,
+                supplier.Industry,
+                supplier.WebsiteUrl
+            },
+            questions,
+            facts = supplier.SupplierFacts
+                .Where(fact => fact.FactType is not SupplierFactType.MissingEvidence and not SupplierFactType.SourceLimitation)
+                .OrderByDescending(fact => fact.Confidence)
+                .ThenByDescending(fact => fact.CreatedAt)
+                .Take(40)
+                .Select(fact => new
+                {
+                    type = fact.FactType.ToString(),
+                    fact.Value,
+                    fact.SourceName,
+                    fact.SourceUrl,
+                    confidence = fact.Confidence.ToString()
+                }),
+            sources = supplier.SourceChecks
+                .OrderByDescending(source => source.CheckedAt)
+                .Take(30)
+                .Select(source => new
+                {
+                    source.SourceName,
+                    source.Url,
+                    status = source.Status.ToString(),
+                    notes = ShortenText(source.Notes, 600)
+                })
+        };
+    }
+
+    private static string BuildOpenQuestionRecheckSystemPrompt()
+    {
+        return """
+            You resolve supplier open questions using only the JSON evidence supplied by the app.
+            Do not browse the web. Do not invent missing facts.
+            For every input question, return whether existing facts or source notes resolve it.
+            Mark a question "resolved" only if the evidence directly answers it.
+            Mark it "unresolved" if the evidence is missing, vague, contradictory, or only indirectly related.
+            Use short evidence notes. Prefer exact facts, source names, addresses, products, websites, countries, and markets.
+            Return JSON only with this exact shape:
+            {
+              "resolved": [
+                { "question": "...", "status": "resolved", "evidenceNote": "...", "sourceName": "..." }
+              ],
+              "unresolved": [
+                { "question": "...", "status": "unresolved", "evidenceNote": "...", "sourceName": "" }
+              ]
+            }
+            """;
+    }
+
+    private static RecheckOpenQuestionsResponse ParseOpenQuestionRecheckResponse(
+        string modelResponse,
+        IReadOnlyList<string> fallbackQuestions)
+    {
+        try
+        {
+            var json = ExtractJsonObject(modelResponse);
+            var parsed = JsonSerializer.Deserialize<OpenQuestionRecheckModelResponse>(
+                json,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (parsed is null)
+            {
+                return BuildFallbackOpenQuestionResponse(fallbackQuestions);
+            }
+
+            var resolved = MapQuestionResolutions(parsed.Resolved, "resolved");
+            var unresolved = MapQuestionResolutions(parsed.Unresolved, "unresolved");
+            var returnedQuestions = resolved
+                .Concat(unresolved)
+                .Select(item => item.Question)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            unresolved.AddRange(fallbackQuestions
+                .Where(question => !returnedQuestions.Contains(question))
+                .Select(question => new OpenQuestionResolutionResponse(
+                    question,
+                    "unresolved",
+                    "The model did not return a resolution for this question.",
+                    string.Empty)));
+
+            return new RecheckOpenQuestionsResponse(resolved, unresolved);
+        }
+        catch (JsonException)
+        {
+            return BuildFallbackOpenQuestionResponse(fallbackQuestions);
+        }
+    }
+
+    private static string ExtractJsonObject(string value)
+    {
+        var start = value.IndexOf('{', StringComparison.Ordinal);
+        var end = value.LastIndexOf('}');
+
+        return start >= 0 && end > start
+            ? value[start..(end + 1)]
+            : value;
+    }
+
+    private static List<OpenQuestionResolutionResponse> MapQuestionResolutions(
+        IReadOnlyList<OpenQuestionResolutionModel>? items,
+        string status)
+    {
+        return (items ?? [])
+            .Where(item => !string.IsNullOrWhiteSpace(item.Question))
+            .Select(item => new OpenQuestionResolutionResponse(
+                item.Question.Trim(),
+                status,
+                string.IsNullOrWhiteSpace(item.EvidenceNote) ? "No evidence note returned." : item.EvidenceNote.Trim(),
+                item.SourceName?.Trim() ?? string.Empty))
+            .ToList();
+    }
+
+    private static RecheckOpenQuestionsResponse BuildFallbackOpenQuestionResponse(IReadOnlyList<string> questions)
+    {
+        return new RecheckOpenQuestionsResponse(
+            [],
+            questions.Select(question => new OpenQuestionResolutionResponse(
+                question,
+                "unresolved",
+                "The model response could not be parsed, so the question was kept open.",
+                string.Empty)).ToList());
+    }
+
+    private sealed record OpenQuestionRecheckModelResponse(
+        IReadOnlyList<OpenQuestionResolutionModel>? Resolved,
+        IReadOnlyList<OpenQuestionResolutionModel>? Unresolved);
+
+    private sealed record OpenQuestionResolutionModel(
+        string Question,
+        string Status,
+        string EvidenceNote,
+        string? SourceName);
 
     private static TrustBreakdownItemResponse BuildIdentityTrustItem(
         SupplierMatchCandidate? confirmedIdentity,
@@ -1468,19 +2091,19 @@ public static class SupplierEndpoints
         var registrationCount = supplier.SourceChecks.Count(source =>
             source.Status == SourceCheckStatus.Reachable &&
             IsRegistrationEvidence(source));
-        var certificationCount = supplier.SourceChecks.Count(source =>
+        var claimCount = supplier.SourceChecks.Count(source =>
             source.Status == SourceCheckStatus.Reachable &&
             IsCertificationEvidence(source));
         var failedOrBlockedCount = supplier.SourceChecks.Count(source =>
             source.Status is SourceCheckStatus.Blocked or SourceCheckStatus.Failed);
-        var categorizedReachableCount = officialWebsiteCount + registrationCount + certificationCount;
+        var categorizedReachableCount = officialWebsiteCount + registrationCount + claimCount;
         var generalEvidenceCount = Math.Max(0, supplier.SourceChecks.Count(source => source.Status == SourceCheckStatus.Reachable) - categorizedReachableCount);
 
         return new List<SourceMixItemResponse>
         {
             new("Official website", officialWebsiteCount, officialWebsiteCount > 0 ? "Present" : "Missing"),
-            new("Registration source", registrationCount, registrationCount > 0 ? "Present" : "Missing"),
-            new("Certification source", certificationCount, certificationCount > 0 ? "Present" : "Missing"),
+            new("Company source", registrationCount, registrationCount > 0 ? "Present" : "Missing"),
+            new("Claim source", claimCount, claimCount > 0 ? "Present" : "Missing"),
             new("General public evidence", generalEvidenceCount, generalEvidenceCount > 0 ? "Present" : "Missing"),
             new("Blocked or failed", failedOrBlockedCount, failedOrBlockedCount > 0 ? "Needs review" : "Clear")
         };
@@ -1540,7 +2163,6 @@ public static class SupplierEndpoints
         Supplier supplier,
         SupplierMatchCandidate? confirmedIdentity,
         int reachableSources,
-        int verifiedCertifications,
         bool hasRegistrationEvidence,
         RiskAssessment? latestAssessment)
     {
@@ -1561,19 +2183,14 @@ public static class SupplierEndpoints
             items.Add($"{reachableSources} reachable public evidence source{(reachableSources == 1 ? string.Empty : "s")}.");
         }
 
-        if (verifiedCertifications > 0)
-        {
-            items.Add($"{verifiedCertifications} verified certification record{(verifiedCertifications == 1 ? string.Empty : "s")}.");
-        }
-
         if (hasRegistrationEvidence)
         {
-            items.Add("Registration-style evidence is present.");
+            items.Add("Company-information evidence is present.");
         }
 
         if (latestAssessment is not null)
         {
-            items.Add($"Latest risk memo is {latestAssessment.RiskLevel} with {FormatRiskScore(latestAssessment)}.");
+            items.Add("A research memo is available for open questions.");
         }
 
         if (items.Count == 0)
@@ -1588,7 +2205,6 @@ public static class SupplierEndpoints
         SupplierMatchCandidate? confirmedIdentity,
         int reachableSources,
         int failedSources,
-        int verifiedCertifications,
         bool hasRegistrationEvidence,
         RiskAssessment? latestAssessment)
     {
@@ -1609,14 +2225,9 @@ public static class SupplierEndpoints
             items.Add("Find registration or company-information evidence.");
         }
 
-        if (verifiedCertifications == 0)
-        {
-            items.Add("No certification has been verified.");
-        }
-
         if (latestAssessment is null)
         {
-            items.Add("No risk memo has been stored.");
+            items.Add("No research memo has been stored.");
         }
 
         if (failedSources > 0)
@@ -1632,15 +2243,11 @@ public static class SupplierEndpoints
         SupplierMatchCandidate? confirmedIdentity,
         RiskAssessment? latestAssessment,
         int reachableSourceCount,
-        int verifiedCertificationCount,
-        bool hasRegistrationEvidence,
-        bool hasCertificationEvidence)
+        bool hasRegistrationEvidence)
     {
         var items = new List<string>
         {
-            confirmedIdentity is null
-                ? $"Supplier record: {supplier.Name} in {supplier.CountryCode} for {supplier.Industry}"
-                : $"Confirmed identity: {FormatIdentityName(confirmedIdentity.CandidateName)}"
+            $"Supplier record: {supplier.Name} in {supplier.CountryCode} for {supplier.Industry}"
         };
 
         var website = supplier.WebsiteUrl ?? confirmedIdentity?.WebsiteUrl;
@@ -1650,120 +2257,110 @@ public static class SupplierEndpoints
         }
 
         items.Add(hasRegistrationEvidence
-            ? "Legal registration evidence found in public sources"
-            : "Legal registration evidence still needs confirmation");
-        items.Add(verifiedCertificationCount > 0
-            ? $"Verified certifications saved: {verifiedCertificationCount}"
-            : hasCertificationEvidence
-                ? "Certification evidence found but not verified"
-                : "No verified certification saved yet");
+            ? "Company-information source found in public research"
+            : "Company-information source still needs confirmation");
         items.Add(reachableSourceCount > 0
-            ? $"{reachableSourceCount} reachable public evidence source{(reachableSourceCount == 1 ? string.Empty : "s")}"
+            ? $"{reachableSourceCount} reachable public source{(reachableSourceCount == 1 ? string.Empty : "s")}"
             : "No reachable public evidence source yet");
+
+        foreach (var fact in supplier.SupplierFacts
+            .Where(fact => fact.FactType is not SupplierFactType.MissingEvidence and not SupplierFactType.SourceLimitation)
+            .OrderByDescending(fact => fact.Confidence)
+            .ThenByDescending(fact => fact.CreatedAt)
+            .Take(4))
+        {
+            items.Add($"{FormatFactType(fact.FactType)}: {ShortenText(fact.Value, 160)}");
+        }
 
         if (latestAssessment is not null)
         {
-            items.Add($"Current risk view: {latestAssessment.RiskLevel}");
+            items.Add("A research memo is available in Open questions.");
         }
 
         return items;
     }
 
     private static List<string> BuildMissingInformation(
-        SupplierMatchCandidate? confirmedIdentity,
         int reachableSourceCount,
-        int verifiedCertificationCount,
+        int failedSourceCount,
         bool hasRegistrationEvidence,
-        bool hasCertificationEvidence)
+        int factCount)
     {
         var items = new List<string>();
 
-        if (confirmedIdentity is null)
-        {
-            items.Add("Supplier identity is not confirmed.");
-        }
-
         if (!hasRegistrationEvidence)
         {
-            items.Add("Legal registration evidence still needs confirmation.");
+            items.Add("A clear company-information source was not found yet.");
         }
 
-        if (verifiedCertificationCount == 0)
+        if (factCount == 0)
         {
-            items.Add(hasCertificationEvidence
-                ? "Certification evidence exists but no certification is verified."
-                : "No verified certification evidence found.");
+            items.Add("No extracted supplier facts are stored yet.");
         }
 
         if (reachableSourceCount == 0)
         {
-            items.Add("No reachable public evidence source confirmed.");
+            items.Add("No reachable public source has been confirmed.");
+        }
+
+        if (failedSourceCount > 0)
+        {
+            items.Add($"{failedSourceCount} public source{(failedSourceCount == 1 ? " is" : "s are")} blocked or failed.");
         }
 
         return items;
     }
 
     private static SupplierReviewNextActionResponse BuildReviewNextAction(
-        SupplierMatchCandidate? confirmedIdentity,
         IReadOnlyList<string> missingInformation,
         RiskAssessment? latestAssessment)
     {
-        if (confirmedIdentity is null)
-        {
-            return new SupplierReviewNextActionResponse(
-                "ConfirmIdentity",
-                "Confirm supplier identity",
-                "Review possible legal entities and save the supplier identity before trusting evidence or reports.",
-                "Review matches",
-                "identity");
-        }
-
         if (missingInformation.Count > 0)
         {
             return new SupplierReviewNextActionResponse(
-                "ReviewEvidence",
-                "Close evidence gaps",
-                "Important verification evidence is still missing or unverified.",
-                "Review evidence",
-                "evidence");
+                "ReviewSources",
+                "Review source gaps",
+                "The research found useful material, but some source or fact gaps still need attention.",
+                "Open sources",
+                "sources");
         }
 
         if (latestAssessment is null)
         {
             return new SupplierReviewNextActionResponse(
-                "ReviewRisk",
-                "Review risk",
-                "Evidence exists, but no stored risk decision is available yet.",
-                "Open risk",
-                "risk");
+                "ReviewQuestions",
+                "Review open questions",
+                "Sources exist, but no research memo has been stored for the unresolved questions yet.",
+                "Open questions",
+                "questions");
         }
 
         return new SupplierReviewNextActionResponse(
             "PrepareReport",
-            "Prepare report",
-            "The main review inputs are available. Check recommendations before exporting.",
-            "Open report",
-            "report");
+            "Research briefing ready",
+            "The main public research inputs are available. Review sources, open questions, and similar suppliers.",
+            "Open briefing",
+            "briefing");
     }
 
     private static string BuildReviewHeadline(
-        SupplierMatchCandidate? confirmedIdentity,
+        int reachableSourceCount,
         IReadOnlyList<string> missingInformation,
         RiskAssessment? latestAssessment)
     {
-        if (confirmedIdentity is null)
+        if (reachableSourceCount == 0)
         {
-            return "Identity needs review";
+            return "Research has not found usable sources yet";
         }
 
         if (missingInformation.Count > 0)
         {
-            return "Identity confirmed, evidence gaps remain";
+            return "Useful sources found, open questions remain";
         }
 
         return latestAssessment is null
-            ? "Identity confirmed, risk pending"
-            : "Supplier review is ready";
+            ? "Sources found, memo pending"
+            : "Supplier research briefing is ready";
     }
 
     private static bool IsRegistrationEvidence(SourceCheck sourceCheck)
@@ -1849,6 +2446,28 @@ public static class SupplierEndpoints
             : url;
     }
 
+    private static string FormatFactType(SupplierFactType factType)
+    {
+        return factType.ToString() switch
+        {
+            "ProductOrService" => "Product or service",
+            "OperationalFootprint" => "Operational footprint",
+            "LegalIdentity" => "Company identity clue",
+            "RiskSignal" => "Research signal",
+            "CertificationClaim" => "Claim mentioned in source",
+            var value => value
+        };
+    }
+
+    private static string ShortenText(string value, int maxLength)
+    {
+        var normalized = string.Join(' ', value.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+
+        return normalized.Length <= maxLength
+            ? normalized
+            : normalized[..Math.Max(0, maxLength - 3)].Trim() + "...";
+    }
+
     private static string BuildRiskAssessmentSystemPrompt()
     {
         return """
@@ -1857,27 +2476,23 @@ public static class SupplierEndpoints
             Do not invent certifications, sources, facts, or risk signals.
             If evidence is missing, name only supplier evidence that a user can add.
             Internal calculation fields are not missing supplier evidence.
-            Use riskDecision.level and riskDecision.score from the evidence JSON.
-            Use evidenceQuality.score and evidenceQuality.band to explain confidence.
             Use supplierFacts as the primary trusted fact list.
             Use companySummary to explain what kind of company this appears to be.
-            Prefer externalHighlights over ownWebsiteHighlights when describing the company.
-            Use supplierProfile, supplierFacts, companySummary, expectedEvidence, and recommendedNextChecks when evidence is sparse.
-            Use sourceChecks only as supporting technical evidence or to explain blocked and failed checks.
-            For the Gaps or risks section, use missingEvidenceSuggestions.
-            Keep the answer short enough for an operational UI.
+            Prefer precise product, service, location, market, website, and source facts over generic confidence commentary.
+            Write short sentences. Avoid long paragraphs. Each bullet should be one concrete fact.
+            If a location or address appears in supplierFacts, companySummary, or sourceChecks, include it under Locations / markets.
             Return markdown with exactly these sections:
             ## Company profile
-            Explain in 1 or 2 sentences what the company appears to do, using only evidence from companySummary and sourceChecks.
-            ## Risk decision
-            State the calculated risk level and score in one sentence, and say it is a draft if evidence is sparse.
-            ## Evidence used
-            Mention certifications and source checks separately. Cite only categories and names from the JSON.
-            ## Gaps or risks
-            List missing certifications, missing registry evidence, expired certifications, blocked sources, or failed sources.
+            Explain in 1 or 2 short sentences what the supplier appears to do.
+            ## Products and services
+            List up to 5 concrete product or service facts.
+            ## Locations and markets
+            List up to 5 location, address, country, shipping, export, or market facts.
+            ## Important source findings
+            List up to 5 useful facts from sourceChecks or supplierFacts.
+            ## Open questions
+            List only unclear facts that matter for quickly understanding the supplier.
             Do not list JSON field names as gaps.
-            ## Recommended next checks
-            Give 2 or 3 concrete next checks, prioritizing certification and registry evidence before broad research.
             """;
     }
 

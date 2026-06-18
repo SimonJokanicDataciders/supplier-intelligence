@@ -9,9 +9,15 @@ public sealed record LocalModelStatusResponse(
     string Provider,
     string BaseUrl,
     string DefaultModel,
+    bool IsApiKeyConfigured,
+    string ApiKeySource,
+    string ApiKeyFingerprint,
+    DateTimeOffset? ApiKeyUpdatedAt,
     bool IsReachable,
     string? ErrorMessage,
     IReadOnlyList<LocalModelInfo> Models);
+
+public sealed record SaveOpenRouterApiKeyRequest(string ApiKey);
 
 public sealed record GenerateSupplierBriefingRequest
 {

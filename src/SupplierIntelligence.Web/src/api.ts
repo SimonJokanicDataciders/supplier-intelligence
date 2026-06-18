@@ -131,7 +131,7 @@ export type SupplierReviewNextAction = {
   step: ReviewStepName
 }
 
-export type ReviewStepName = 'identity' | 'evidence' | 'risk' | 'report'
+export type ReviewStepName = 'briefing' | 'sources' | 'questions' | 'connections' | 'report'
 
 export type SupplierTrustSignals = {
   identity: string
@@ -149,6 +149,29 @@ export type SupplierAnalytics = {
   timeline: TimelineItem[]
   strongestSignals: string[]
   weakestGaps: string[]
+}
+
+export type SupplierConnection = {
+  supplierId: number
+  supplierName: string
+  countryCode: string
+  industry: string
+  websiteUrl: string | null
+  strengthLabel: string
+  reasons: string[]
+  sharedTerms: string[]
+}
+
+export type OpenQuestionResolution = {
+  question: string
+  status: string
+  evidenceNote: string
+  sourceName: string
+}
+
+export type RecheckOpenQuestionsResponse = {
+  resolved: OpenQuestionResolution[]
+  unresolved: OpenQuestionResolution[]
 }
 
 export type TrustBreakdownItem = {
@@ -182,6 +205,10 @@ export type LocalModelStatus = {
   provider: string
   baseUrl: string
   defaultModel: string
+  isApiKeyConfigured: boolean
+  apiKeySource: string
+  apiKeyFingerprint: string
+  apiKeyUpdatedAt: string | null
   isReachable: boolean
   errorMessage: string | null
   models: LocalModelInfo[]
@@ -211,6 +238,10 @@ export type SourceCheckInput = {
 
 export type CheckSourceEvidenceInput = {
   sourceName: string
+  url: string
+}
+
+export type ResearchWebsiteSourceInput = {
   url: string
 }
 
@@ -277,6 +308,17 @@ export function getSupplierAnalytics(id: number) {
   return request<SupplierAnalytics>(`/api/suppliers/${id}/analytics`)
 }
 
+export function getSupplierConnections(id: number) {
+  return request<SupplierConnection[]>(`/api/suppliers/${id}/connections`)
+}
+
+export function recheckOpenQuestions(id: number, questions: string[]) {
+  return request<RecheckOpenQuestionsResponse>(`/api/suppliers/${id}/open-questions/recheck`, {
+    method: 'POST',
+    body: JSON.stringify({ questions }),
+  })
+}
+
 export function getSupplierAnalysisJobs(supplierId: number) {
   return request<AnalysisJob[]>(`/api/suppliers/${supplierId}/analysis-jobs`)
 }
@@ -299,6 +341,19 @@ export function getLocalModelStatus() {
   return request<LocalModelStatus>('/api/local-models/')
 }
 
+export function saveOpenRouterApiKey(apiKey: string) {
+  return request<{ isApiKeyConfigured: boolean; apiKeySource: string }>('/api/local-models/openrouter-key', {
+    method: 'POST',
+    body: JSON.stringify({ apiKey }),
+  })
+}
+
+export function clearOpenRouterApiKey() {
+  return request<void>('/api/local-models/openrouter-key', {
+    method: 'DELETE',
+  })
+}
+
 export function createSupplier(input: CreateSupplierInput) {
   return request<SupplierDetail>('/api/suppliers', {
     method: 'POST',
@@ -309,6 +364,13 @@ export function createSupplier(input: CreateSupplierInput) {
 export function archiveSupplier(id: number) {
   return request<void>(`/api/suppliers/${id}/archive`, {
     method: 'POST',
+  })
+}
+
+export function updateSupplierIndustry(id: number, industry: string) {
+  return request<SupplierDetail>(`/api/suppliers/${id}/industry`, {
+    method: 'PATCH',
+    body: JSON.stringify({ industry }),
   })
 }
 
@@ -350,8 +412,28 @@ export function addSourceCheck(supplierId: number, input: SourceCheckInput) {
   })
 }
 
+export function updateSourceCheck(supplierId: number, sourceCheckId: number, input: SourceCheckInput) {
+  return request<SourceCheck>(`/api/suppliers/${supplierId}/source-checks/${sourceCheckId}`, {
+    method: 'PUT',
+    body: JSON.stringify(input),
+  })
+}
+
+export function deleteSourceCheck(supplierId: number, sourceCheckId: number) {
+  return request<void>(`/api/suppliers/${supplierId}/source-checks/${sourceCheckId}`, {
+    method: 'DELETE',
+  })
+}
+
 export function checkSourceEvidence(supplierId: number, input: CheckSourceEvidenceInput) {
   return request<SourceCheck>(`/api/suppliers/${supplierId}/source-checks/check`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export function researchWebsiteSource(supplierId: number, input: ResearchWebsiteSourceInput) {
+  return request<SourceCheck[]>(`/api/suppliers/${supplierId}/source-checks/research-website`, {
     method: 'POST',
     body: JSON.stringify(input),
   })

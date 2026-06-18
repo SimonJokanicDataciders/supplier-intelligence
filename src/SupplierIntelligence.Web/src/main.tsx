@@ -2,37 +2,46 @@ import { StrictMode, useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
   archiveSupplier,
+  clearOpenRouterApiKey,
   confirmSupplierMatchCandidate,
   createSupplier,
+  deleteSourceCheck,
   getSupplierAnalytics,
   getSupplierAnalysisJob,
   getSupplierAnalysisJobs,
+  getSupplierConnections,
   getSupplierMatchCandidates,
   getLocalModelStatus,
   getSupplier,
   getSupplierReviewSummary,
   getSuppliers,
   queueSupplierAnalysis,
+  recheckOpenQuestions,
   rejectSupplierMatchCandidate,
+  researchWebsiteSource,
+  saveOpenRouterApiKey,
   suggestSupplierMatchCandidates,
+  updateSourceCheck,
+  updateSupplierIndustry,
+  addSourceCheck,
   type ReviewStepName,
   type AnalysisJob,
-  type Certification,
   type CreateSupplierInput,
   type LocalModelStatus,
   type RiskAssessment,
-  type RiskLevel,
   type ResearchSource,
   type SourceCheck,
+  type SourceCheckInput,
   type SourceMixItem,
   type SupplierFact,
+  type OpenQuestionResolution,
   type SupplierAnalytics,
+  type SupplierConnection,
   type SupplierDetail,
   type SupplierMatchCandidate,
   type SupplierReviewSummary,
   type SupplierSummary,
   type TimelineItem,
-  type TrustBreakdownItem,
 } from './api.ts'
 import './styles.css'
 
@@ -44,7 +53,11 @@ const emptySupplierForm: CreateSupplierInput = {
   runInitialAnalysis: true,
 }
 
+const supplierFolderOrderStorageKey = 'supplier-intelligence-folder-order'
+const resolvedOpenQuestionsStoragePrefix = 'supplier-intelligence-resolved-open-questions'
+
 type ReviewStep = ReviewStepName
+type SourceFormState = SourceCheckInput
 
 function App() {
   const [suppliers, setSuppliers] = useState<SupplierSummary[]>([])
@@ -52,20 +65,47 @@ function App() {
   const [supplier, setSupplier] = useState<SupplierDetail | null>(null)
   const [reviewSummary, setReviewSummary] = useState<SupplierReviewSummary | null>(null)
   const [supplierAnalytics, setSupplierAnalytics] = useState<SupplierAnalytics | null>(null)
+  const [supplierConnections, setSupplierConnections] = useState<SupplierConnection[]>([])
   const [matchCandidates, setMatchCandidates] = useState<SupplierMatchCandidate[]>([])
   const [supplierForm, setSupplierForm] = useState<CreateSupplierInput>(emptySupplierForm)
+  const [sourceForm, setSourceForm] = useState<SourceFormState>({
+    sourceName: '',
+    url: '',
+    status: 'Reachable',
+    notes: '',
+  })
+  const [websiteResearchUrl, setWebsiteResearchUrl] = useState('')
+  const [editingSourceId, setEditingSourceId] = useState<number | null>(null)
+  const [sourceMessage, setSourceMessage] = useState<string | null>(null)
+  const [resolvedOpenQuestions, setResolvedOpenQuestions] = useState<string[]>([])
+  const [openQuestionRecheckResult, setOpenQuestionRecheckResult] = useState<OpenQuestionResolution[] | null>(null)
   const [localModelStatus, setLocalModelStatus] = useState<LocalModelStatus | null>(null)
   const [activeAnalysisJob, setActiveAnalysisJob] = useState<AnalysisJob | null>(null)
+  const [openRouterApiKey, setOpenRouterApiKey] = useState('')
+  const [runtimeKeyMessage, setRuntimeKeyMessage] = useState<{ tone: 'ok' | 'warn' | 'error'; text: string } | null>(null)
+  const [folderMessage, setFolderMessage] = useState<string | null>(null)
+  const [dragOverIndustry, setDragOverIndustry] = useState<string | null>(null)
+  const [rankTargetIndustry, setRankTargetIndustry] = useState<string | null>(null)
+  const [folderOrder, setFolderOrder] = useState<string[]>(() => readStoredFolderOrder())
   const [loading, setLoading] = useState(true)
   const [checkingLocalModel, setCheckingLocalModel] = useState(false)
+  const [savingOpenRouterKey, setSavingOpenRouterKey] = useState(false)
   const [creatingSupplier, setCreatingSupplier] = useState(false)
   const [archivingSupplier, setArchivingSupplier] = useState(false)
   const [queueingAnalysis, setQueueingAnalysis] = useState(false)
+  const [savingSource, setSavingSource] = useState(false)
+  const [researchingWebsite, setResearchingWebsite] = useState(false)
+  const [recheckingOpenQuestions, setRecheckingOpenQuestions] = useState(false)
+  const [deletingSourceId, setDeletingSourceId] = useState<number | null>(null)
   const [loadingMatchCandidates, setLoadingMatchCandidates] = useState(false)
   const [reviewingMatchCandidateId, setReviewingMatchCandidateId] = useState<number | null>(null)
-  const [activeReviewStep, setActiveReviewStep] = useState<ReviewStep>('identity')
+  const [activeReviewStep, setActiveReviewStep] = useState<ReviewStep>('briefing')
   const [error, setError] = useState<string | null>(null)
   const visibleSuppliers = useMemo(() => buildVisibleSuppliers(suppliers), [suppliers])
+  const supplierFolders = useMemo(
+    () => groupSuppliersByIndustry(visibleSuppliers, folderOrder),
+    [visibleSuppliers, folderOrder],
+  )
 
   useEffect(() => {
     void loadSuppliers()
@@ -76,15 +116,21 @@ function App() {
     if (selectedSupplierId === null) {
       setReviewSummary(null)
       setSupplierAnalytics(null)
+      setSupplierConnections([])
       setActiveAnalysisJob(null)
       setMatchCandidates([])
+      setResolvedOpenQuestions([])
+      setOpenQuestionRecheckResult(null)
       return
     }
 
-    setActiveReviewStep('identity')
+    setActiveReviewStep('briefing')
+    setResolvedOpenQuestions(readResolvedOpenQuestions(selectedSupplierId))
+    setOpenQuestionRecheckResult(null)
     void loadSupplier(selectedSupplierId)
     void loadReviewSummary(selectedSupplierId)
     void loadSupplierAnalytics(selectedSupplierId)
+    void loadSupplierConnections(selectedSupplierId)
     void loadAnalysisJobs(selectedSupplierId)
     void loadMatchCandidates(selectedSupplierId)
   }, [selectedSupplierId])
@@ -151,6 +197,25 @@ function App() {
     }
   }
 
+  async function loadSupplierConnections(id: number) {
+    setError(null)
+
+    try {
+      setSupplierConnections(await getSupplierConnections(id))
+    } catch (exception) {
+      setError(readError(exception))
+    }
+  }
+
+  async function refreshSupplierResearchData(id: number) {
+    await Promise.all([
+      loadSupplier(id),
+      loadReviewSummary(id),
+      loadSupplierAnalytics(id),
+      loadSupplierConnections(id),
+    ])
+  }
+
   async function loadAnalysisJobs(supplierId: number) {
     setError(null)
 
@@ -183,19 +248,195 @@ function App() {
     setCheckingLocalModel(true)
 
     try {
-      setLocalModelStatus(await getLocalModelStatus())
+      const status = await getLocalModelStatus()
+      setLocalModelStatus(status)
+      return status
     } catch (exception) {
-      setLocalModelStatus({
+      const status = {
         provider: 'Unknown',
         baseUrl: 'Unknown',
         defaultModel: 'Unknown',
+        isApiKeyConfigured: false,
+        apiKeySource: 'Unknown',
+        apiKeyFingerprint: '',
+        apiKeyUpdatedAt: null,
         isReachable: false,
         errorMessage: readError(exception),
         models: [],
-      })
+      }
+      setLocalModelStatus(status)
+      return status
     } finally {
       setCheckingLocalModel(false)
     }
+  }
+
+  async function saveOpenRouterKeyForRun(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setSavingOpenRouterKey(true)
+    setError(null)
+
+    try {
+      await saveOpenRouterApiKey(openRouterApiKey)
+      setOpenRouterApiKey('')
+      const status = await loadLocalModelStatus()
+      setRuntimeKeyMessage(buildRuntimeKeyMessage('save', status))
+    } catch (exception) {
+      setRuntimeKeyMessage({ tone: 'error', text: readError(exception) })
+    } finally {
+      setSavingOpenRouterKey(false)
+    }
+  }
+
+  async function testOpenRouterConnection() {
+    setSavingOpenRouterKey(true)
+    setError(null)
+
+    try {
+      const status = await loadLocalModelStatus()
+      setRuntimeKeyMessage(buildRuntimeKeyMessage('test', status))
+    } catch (exception) {
+      setRuntimeKeyMessage({ tone: 'error', text: readError(exception) })
+    } finally {
+      setSavingOpenRouterKey(false)
+    }
+  }
+
+  async function clearOpenRouterKeyForRun() {
+    setSavingOpenRouterKey(true)
+    setError(null)
+
+    try {
+      await clearOpenRouterApiKey()
+      const status = await loadLocalModelStatus()
+      setRuntimeKeyMessage({
+        tone: status.isApiKeyConfigured ? 'warn' : 'ok',
+        text: status.isApiKeyConfigured
+          ? `Runtime key cleared, but another runtime key is still active: ${status.apiKeyFingerprint}.`
+          : 'Runtime key cleared. No OpenRouter key is configured now.',
+      })
+    } catch (exception) {
+      setRuntimeKeyMessage({ tone: 'error', text: readError(exception) })
+    } finally {
+      setSavingOpenRouterKey(false)
+    }
+  }
+
+  async function submitSource(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (supplier === null) {
+      return
+    }
+
+    setSavingSource(true)
+    setError(null)
+    setSourceMessage(null)
+
+    try {
+      if (editingSourceId === null) {
+        await addSourceCheck(supplier.id, sourceForm)
+        setSourceMessage('Source added.')
+      } else {
+        await updateSourceCheck(supplier.id, editingSourceId, sourceForm)
+        setSourceMessage('Source updated.')
+      }
+
+      setSourceForm({ sourceName: '', url: '', status: 'Reachable', notes: '' })
+      setEditingSourceId(null)
+      await refreshSupplierResearchData(supplier.id)
+    } catch (exception) {
+      setError(readError(exception))
+    } finally {
+      setSavingSource(false)
+    }
+  }
+
+  async function researchWebsite(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (supplier === null) {
+      return
+    }
+
+    setResearchingWebsite(true)
+    setError(null)
+    setSourceMessage(null)
+
+    try {
+      const createdSources = await researchWebsiteSource(supplier.id, { url: websiteResearchUrl })
+      setWebsiteResearchUrl('')
+      setSourceMessage(
+        createdSources.length === 0
+          ? 'Website already researched. No new source cards added.'
+          : `Website researched. Added ${createdSources.length} source${createdSources.length === 1 ? '' : 's'}.`,
+      )
+      await refreshSupplierResearchData(supplier.id)
+    } catch (exception) {
+      setError(readError(exception))
+    } finally {
+      setResearchingWebsite(false)
+    }
+  }
+
+  async function removeSource(sourceCheckId: number) {
+    if (supplier === null) {
+      return
+    }
+
+    setDeletingSourceId(sourceCheckId)
+    setError(null)
+    setSourceMessage(null)
+
+    try {
+      await deleteSourceCheck(supplier.id, sourceCheckId)
+      setSourceMessage('Source removed.')
+      await refreshSupplierResearchData(supplier.id)
+    } catch (exception) {
+      setError(readError(exception))
+    } finally {
+      setDeletingSourceId(null)
+    }
+  }
+
+  async function recheckCurrentOpenQuestions() {
+    if (supplier === null || openQuestionItems.length === 0) {
+      return
+    }
+
+    setRecheckingOpenQuestions(true)
+    setError(null)
+    setOpenQuestionRecheckResult(null)
+
+    try {
+      const result = await recheckOpenQuestions(supplier.id, openQuestionItems)
+      const nextResolvedQuestions = distinctText([
+        ...resolvedOpenQuestions,
+        ...result.resolved.map((item) => item.question),
+      ])
+      setResolvedOpenQuestions(nextResolvedQuestions)
+      writeResolvedOpenQuestions(supplier.id, nextResolvedQuestions)
+      setOpenQuestionRecheckResult([...result.resolved, ...result.unresolved])
+    } catch (exception) {
+      setError(readError(exception))
+    } finally {
+      setRecheckingOpenQuestions(false)
+    }
+  }
+
+  function startEditingSource(sourceCheck: SourceCheck) {
+    setEditingSourceId(sourceCheck.id)
+    setSourceForm({
+      sourceName: sourceCheck.sourceName,
+      url: sourceCheck.url,
+      status: normalizeSourceStatus(sourceCheck.status),
+      notes: sourceCheck.notes,
+    })
+    setSourceMessage('Editing source. Save changes or cancel.')
+  }
+
+  function cancelEditingSource() {
+    setEditingSourceId(null)
+    setSourceForm({ sourceName: '', url: '', status: 'Reachable', notes: '' })
+    setSourceMessage(null)
   }
 
   async function submitSupplier(event: React.FormEvent<HTMLFormElement>) {
@@ -214,6 +455,7 @@ function App() {
       setMatchCandidates([])
       await loadReviewSummary(createdSupplier.id)
       await loadSupplierAnalytics(createdSupplier.id)
+      await loadSupplierConnections(createdSupplier.id)
       await loadMatchCandidates(createdSupplier.id)
       setSupplierForm(emptySupplierForm)
       void loadLocalModelStatus()
@@ -243,12 +485,14 @@ function App() {
       setSupplier(null)
       setReviewSummary(null)
       setSupplierAnalytics(null)
+      setSupplierConnections([])
       setMatchCandidates([])
 
       if (nextSupplierId !== null) {
         await loadSupplier(nextSupplierId)
         await loadReviewSummary(nextSupplierId)
         await loadSupplierAnalytics(nextSupplierId)
+        await loadSupplierConnections(nextSupplierId)
         await loadMatchCandidates(nextSupplierId)
       }
     } catch (exception) {
@@ -256,6 +500,86 @@ function App() {
     } finally {
       setArchivingSupplier(false)
     }
+  }
+
+  async function moveSuppliersToIndustry(supplierIds: number[], industry: string) {
+    const ids = [...new Set(supplierIds)].filter((id) => {
+      const item = visibleSuppliers.find((supplierItem) => supplierItem.id === id)
+      return item && item.industry !== industry
+    })
+
+    if (ids.length === 0) {
+      setFolderMessage('Already in this folder.')
+      return
+    }
+
+    setError(null)
+    setFolderMessage(`Moving ${ids.length} supplier${ids.length === 1 ? '' : 's'} to ${industry}...`)
+
+    try {
+      await Promise.all(ids.map((id) => updateSupplierIndustry(id, industry)))
+      await loadSuppliers()
+
+      if (selectedSupplierId !== null && ids.includes(selectedSupplierId)) {
+        await loadSupplier(selectedSupplierId)
+        await loadReviewSummary(selectedSupplierId)
+        await loadSupplierAnalytics(selectedSupplierId)
+        await loadSupplierConnections(selectedSupplierId)
+      }
+
+      setFolderMessage(`Moved ${ids.length} supplier${ids.length === 1 ? '' : 's'} to ${industry}.`)
+    } catch (exception) {
+      setError(readError(exception))
+      setFolderMessage(null)
+    } finally {
+      setDragOverIndustry(null)
+    }
+  }
+
+  function handleFolderDrop(event: React.DragEvent<HTMLElement>, targetIndustry: string) {
+    event.preventDefault()
+    const supplierId = Number(event.dataTransfer.getData('application/x-supplier-id'))
+    const sourceIndustry = event.dataTransfer.getData('application/x-supplier-industry')
+    const sourceFolder = event.dataTransfer.getData('application/x-folder-industry')
+
+    if (Number.isFinite(supplierId) && supplierId > 0) {
+      void moveSuppliersToIndustry([supplierId], targetIndustry)
+      return
+    }
+
+    if (sourceFolder && sourceFolder !== targetIndustry) {
+      const sourceSupplierIds = visibleSuppliers
+        .filter((item) => item.industry === sourceFolder)
+        .map((item) => item.id)
+      void moveSuppliersToIndustry(sourceSupplierIds, targetIndustry)
+      return
+    }
+
+    if (sourceIndustry && sourceIndustry === targetIndustry) {
+      setFolderMessage('Already in this folder.')
+    }
+  }
+
+  function moveFolderAbove(sourceIndustry: string, targetIndustry: string) {
+    if (!sourceIndustry || sourceIndustry === targetIndustry) {
+      setFolderMessage('Folder is already in that position.')
+      return
+    }
+
+    const visibleIndustries = supplierFolders.map((folder) => folder.industry)
+    const nextOrder = reorderIndustryFolders(visibleIndustries, folderOrder, sourceIndustry, targetIndustry)
+    setFolderOrder(nextOrder)
+    writeStoredFolderOrder(nextOrder)
+    setFolderMessage(`Moved ${sourceIndustry} above ${targetIndustry}.`)
+    setDragOverIndustry(null)
+    setRankTargetIndustry(null)
+  }
+
+  function handleFolderRankDrop(event: React.DragEvent<HTMLElement>, targetIndustry: string) {
+    event.preventDefault()
+    event.stopPropagation()
+    const sourceIndustry = event.dataTransfer.getData('application/x-folder-industry')
+    moveFolderAbove(sourceIndustry, targetIndustry)
   }
 
   async function runAnalysis() {
@@ -286,6 +610,7 @@ function App() {
         loadSupplier(supplierId),
         loadReviewSummary(supplierId),
         loadSupplierAnalytics(supplierId),
+        loadSupplierConnections(supplierId),
         loadMatchCandidates(supplierId, true),
       ])
 
@@ -376,12 +701,10 @@ function App() {
   const reachableSourceCount = supplier
     ? supplier.sourceChecks.filter((sourceCheck) => sourceCheck.status === 'Reachable').length
     : 0
-  const evidenceCompletenessScore = supplier
-    ? [supplier.certifications.length > 0, reachableSourceCount > 0, assessments.length > 0].filter(Boolean).length
-    : 0
   const nextEvidenceItems = supplier ? buildNextEvidenceItems(supplier, reachableSourceCount) : []
   const knownSupplierFacts = supplier ? buildKnownSupplierFacts(supplier.supplierFacts) : []
   const usefulResearchSources = supplier ? buildUsefulResearchSources(supplier.researchSources) : []
+  const briefingFacts = supplier ? buildBriefingFacts(supplier, knownSupplierFacts, latestEvidenceSnapshot) : []
   const visibleMatchCandidates = buildVisibleMatchCandidates(matchCandidates)
   const confirmedIdentity = matchCandidates.find((candidate) => candidate.status === 'Confirmed') ?? null
   const hasConfirmedIdentity = confirmedIdentity !== null
@@ -394,12 +717,6 @@ function App() {
         reachableSourceCount,
       })
     : []
-  const riskMemoItems = buildRiskMemoItems({
-    hasConfirmedIdentity,
-    latestAssessment,
-    latestEvidenceQuality,
-    nextEvidenceItems,
-  })
   const nextAction = buildNextAction({
     hasConfirmedIdentity,
     loadingMatchCandidates,
@@ -411,6 +728,12 @@ function App() {
   const displayMissingInformation = reviewSummary?.missingInformation ?? nextEvidenceItems
   const displayNextAction = reviewSummary?.nextAction ?? nextAction
   const displayTrustSignals = reviewSummary?.trustSignals ?? null
+  const openQuestionItems = buildOpenQuestionItems({
+    displayMissingInformation,
+    latestAssessment,
+    latestEvidenceSnapshot,
+    nextEvidenceItems,
+  }).filter((item) => !resolvedOpenQuestions.some((resolved) => normalizeQuestionKey(resolved) === normalizeQuestionKey(item)))
 
   return (
     <main className="app-shell">
@@ -489,20 +812,75 @@ function App() {
         <div className="supplier-list" aria-label="Suppliers">
           {loading && <p className="muted">Loading suppliers...</p>}
           {!loading && visibleSuppliers.length === 0 && <p className="muted">No suppliers found.</p>}
-          {visibleSuppliers.map((item) => (
-            <button
-              className={item.id === selectedSupplierId ? 'supplier-item active' : 'supplier-item'}
-              key={item.id}
-              onClick={() => setSelectedSupplierId(item.id)}
-              type="button"
+          {folderMessage && <p className="folder-message">{folderMessage}</p>}
+          {supplierFolders.map((folder) => (
+            <details
+              className={[
+                'supplier-folder',
+                dragOverIndustry === folder.industry ? 'drag-over' : '',
+                rankTargetIndustry === folder.industry ? 'rank-over' : '',
+              ].filter(Boolean).join(' ')}
+              key={folder.industry}
+              open
+              onDragLeave={() => {
+                setDragOverIndustry(null)
+                setRankTargetIndustry(null)
+              }}
+              onDragOver={(event) => {
+                event.preventDefault()
+                setDragOverIndustry(folder.industry)
+              }}
+              onDrop={(event) => handleFolderDrop(event, folder.industry)}
             >
-              <span>{item.name}</span>
-              <small>
-                {item.countryCode} · {item.industry}
-              </small>
-              {item.websiteUrl && <small>{item.websiteUrl}</small>}
-              <RiskBadge level={item.riskLevel} />
-            </button>
+              <summary
+                draggable
+                onDragStart={(event) => {
+                  event.dataTransfer.effectAllowed = 'move'
+                  event.dataTransfer.setData('application/x-folder-industry', folder.industry)
+                  event.dataTransfer.setData('text/plain', folder.industry)
+                }}
+                onDragOver={(event) => {
+                  if (event.dataTransfer.types.includes('application/x-folder-industry')) {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    setRankTargetIndustry(folder.industry)
+                    setDragOverIndustry(null)
+                  }
+                }}
+                onDrop={(event) => handleFolderRankDrop(event, folder.industry)}
+              >
+                <span>{folder.industry}</span>
+                <small>{folder.suppliers.length}</small>
+              </summary>
+              <div
+                className="supplier-folder-list"
+                onDragOver={(event) => {
+                  event.preventDefault()
+                  setDragOverIndustry(folder.industry)
+                  setRankTargetIndustry(null)
+                }}
+              >
+                {folder.suppliers.map((item) => (
+                  <button
+                    className={item.id === selectedSupplierId ? 'supplier-item active' : 'supplier-item'}
+                    draggable
+                    key={item.id}
+                    onDragStart={(event) => {
+                      event.dataTransfer.effectAllowed = 'move'
+                      event.dataTransfer.setData('application/x-supplier-id', String(item.id))
+                      event.dataTransfer.setData('application/x-supplier-industry', item.industry)
+                      event.dataTransfer.setData('text/plain', item.name)
+                    }}
+                    onClick={() => setSelectedSupplierId(item.id)}
+                    type="button"
+                  >
+                    <span>{item.name}</span>
+                    <small>{item.countryCode}</small>
+                    {item.websiteUrl && <small>{item.websiteUrl}</small>}
+                  </button>
+                ))}
+              </div>
+            </details>
           ))}
         </div>
       </section>
@@ -529,7 +907,6 @@ function App() {
                 </div>
               </div>
               <div className="supplier-header-actions">
-                <RiskBadge level={supplier.riskLevel} />
                 <button
                   className="primary"
                   disabled={queueingAnalysis || isActiveAnalysisJob(activeAnalysisJob)}
@@ -556,163 +933,174 @@ function App() {
             <section className="review-overview">
               <div className="next-action-card">
                 <div className="section-heading">
-                  <p>Next action</p>
+                  <p>Research briefing</p>
                   <span>{reviewSummary?.headline ?? nextAction.status}</span>
                 </div>
                 <h2>{displayNextAction.title}</h2>
                 <p>{displayNextAction.description}</p>
                 <button
                   className="primary"
-                  disabled={!hasConfirmedIdentity && loadingMatchCandidates}
+                  disabled={loadingMatchCandidates}
                   onClick={() => {
-                    if (displayNextAction.step === 'identity' && !hasConfirmedIdentity) {
-                      setActiveReviewStep('identity')
-                      void findMatchCandidates()
-                      return
-                    }
-
                     setActiveReviewStep(displayNextAction.step)
                   }}
                   type="button"
                 >
-                  {!hasConfirmedIdentity && loadingMatchCandidates ? 'Finding matches...' : displayNextAction.buttonLabel}
+                  {loadingMatchCandidates ? 'Loading...' : displayNextAction.buttonLabel}
                 </button>
               </div>
 
               <section className="dashboard-card">
                 <div className="section-heading">
-                  <p>What we know</p>
-                  <span>{displayTrustSignals?.identity ?? (hasConfirmedIdentity ? 'Identity saved' : 'Needs decision')}</span>
+                  <p>What the app found</p>
+                  <span>{displayTrustSignals?.evidence ?? `${reachableSourceCount} sources`}</span>
                 </div>
                 <KnownInformationList items={displayKnownInformation} />
                 {displayTrustSignals && (
                   <div className="trust-signal-row">
-                    <StatusField label="Evidence" value={displayTrustSignals.evidence} />
-                    <StatusField label="Certifications" value={displayTrustSignals.certifications} />
-                    <StatusField label="Risk" value={displayTrustSignals.risk} />
+                    <StatusField label="Facts" value={displayTrustSignals.identity} />
+                    <StatusField label="Sources" value={displayTrustSignals.evidence} />
+                    <StatusField label="Source issues" value={displayTrustSignals.certifications} />
+                    <StatusField label="Company source" value={displayTrustSignals.risk} />
                   </div>
-                )}
-                {supplierAnalytics && (
-                  <TrustBreakdown
-                    compact
-                    overallTrustScore={supplierAnalytics.overallTrustScore}
-                    items={supplierAnalytics.trustBreakdown}
-                  />
                 )}
               </section>
             </section>
 
-            {activeAnalysisJob && (
-              <AnalysisRunPanel
-                analytics={supplierAnalytics}
-                job={activeAnalysisJob}
-                matchCandidates={matchCandidates}
-                supplier={supplier}
-                latestAssessment={latestAssessment}
-              />
-            )}
-
             <nav className="review-stepper" aria-label="Supplier review steps">
               <ReviewStepButton
                 activeStep={activeReviewStep}
-                label="Identity"
-                step="identity"
-                summary={summarizeMatchCandidates(visibleMatchCandidates)}
+                label="Briefing"
+                step="briefing"
+                summary={briefingFacts.length > 0 ? `${briefingFacts.length} facts` : 'Overview'}
                 onSelect={setActiveReviewStep}
               />
               <ReviewStepButton
                 activeStep={activeReviewStep}
-                label="Evidence"
-                step="evidence"
+                label="Sources"
+                step="sources"
                 summary={`${supplier.sourceChecks.length} sources`}
                 onSelect={setActiveReviewStep}
               />
               <ReviewStepButton
                 activeStep={activeReviewStep}
-                label="Risk"
-                step="risk"
-                summary={latestAssessment ? latestAssessment.riskLevel : 'None'}
+                label="Open questions"
+                step="questions"
+                summary={`${openQuestionItems.length} open`}
                 onSelect={setActiveReviewStep}
               />
               <ReviewStepButton
                 activeStep={activeReviewStep}
-                label="Report"
-                step="report"
-                summary={hasConfirmedIdentity ? 'Draft later' : 'Blocked'}
+                label="Connections"
+                step="connections"
+                summary={`${supplierConnections.length} found`}
                 onSelect={setActiveReviewStep}
               />
             </nav>
 
             <section className="review-workspace">
-              {activeReviewStep === 'identity' && (
-                <section className="match-candidate-panel">
-                  <div className="section-heading">
-                    <p>{hasConfirmedIdentity ? 'Saved identity' : 'Possible identities'}</p>
-                    <span>{summarizeMatchCandidates(visibleMatchCandidates)}</span>
-                  </div>
-                  {confirmedIdentity && (
-                    <div className="saved-identity-banner">
-                      <strong>{formatCandidateDisplayName(confirmedIdentity.candidateName)}</strong>
-                      <span>Saved as the confirmed supplier identity.</span>
-                    </div>
-                  )}
-                  <div className="match-candidate-toolbar">
-                    <p>
-                      Confirming saves the selected legal entity on this supplier record. Rejected identities stay dismissed.
-                    </p>
-                    <button
-                      className="primary"
-                      disabled={loadingMatchCandidates}
-                      onClick={findMatchCandidates}
-                      type="button"
-                    >
-                      {loadingMatchCandidates ? 'Finding matches...' : 'Find matches'}
-                    </button>
-                  </div>
-                  <MatchCandidateList
-                    candidates={visibleMatchCandidates}
-                    isLoading={loadingMatchCandidates}
-                    reviewingCandidateId={reviewingMatchCandidateId}
-                    onConfirm={confirmMatchCandidate}
-                    onReject={rejectMatchCandidate}
-                  />
-                </section>
+              {activeReviewStep === 'briefing' && (
+                <SupplierBriefingMemo
+                  displayKnownInformation={displayKnownInformation}
+                  latestEvidenceSnapshot={latestEvidenceSnapshot}
+                  openQuestionItems={openQuestionItems}
+                  supplier={supplier}
+                />
               )}
 
-              {activeReviewStep === 'evidence' && (
+              {activeReviewStep === 'sources' && (
                 <>
-                  {displayMissingInformation.length > 0 && (
-                    <section className="missing-facts-panel">
-                      <div className="section-heading">
-                        <p>Missing facts</p>
-                        <span>{displayMissingInformation.length} open</span>
-                      </div>
-                      <ul>
-                        {displayMissingInformation.map((item) => (
-                          <li key={item}>{item}</li>
-                        ))}
-                      </ul>
-                    </section>
-                  )}
+                  <details className="source-add-panel">
+                    <summary>
+                      <span>Add source</span>
+                      <small>{sourceMessage ?? 'Manual or website research'}</small>
+                    </summary>
+                    <div className="source-add-grid">
+                      <form className="source-check-form" onSubmit={submitSource}>
+                        <label>
+                          Source name
+                          <input
+                            required
+                            value={sourceForm.sourceName}
+                            onChange={(event) => setSourceForm({ ...sourceForm, sourceName: event.target.value })}
+                          />
+                        </label>
+                        <label>
+                          URL
+                          <input
+                            required
+                            type="url"
+                            value={sourceForm.url}
+                            onChange={(event) => setSourceForm({ ...sourceForm, url: event.target.value })}
+                          />
+                        </label>
+                        <label>
+                          Status
+                          <select
+                            value={sourceForm.status}
+                            onChange={(event) =>
+                              setSourceForm({ ...sourceForm, status: normalizeSourceStatus(event.target.value) })
+                            }
+                          >
+                            <option value="Reachable">Reachable</option>
+                            <option value="NotChecked">Not checked</option>
+                            <option value="Blocked">Blocked</option>
+                            <option value="Failed">Failed</option>
+                          </select>
+                        </label>
+                        <label>
+                          What is inside this source
+                          <textarea
+                            required={sourceForm.status === 'Reachable' || sourceForm.status === 'Blocked' || sourceForm.status === 'Failed'}
+                            value={sourceForm.notes}
+                            onChange={(event) => setSourceForm({ ...sourceForm, notes: event.target.value })}
+                          />
+                        </label>
+                        <div className="source-actions">
+                          <button className="primary" disabled={savingSource} type="submit">
+                            {savingSource ? 'Saving...' : editingSourceId === null ? 'Add source' : 'Save source'}
+                          </button>
+                          {editingSourceId !== null && (
+                            <button className="ghost" disabled={savingSource} type="button" onClick={cancelEditingSource}>
+                              Cancel
+                            </button>
+                          )}
+                        </div>
+                      </form>
+
+                      <form className="source-check-form" onSubmit={researchWebsite}>
+                        <label>
+                          Website link for AI research
+                          <input
+                            required
+                            placeholder="https://supplier.example"
+                            type="url"
+                            value={websiteResearchUrl}
+                            onChange={(event) => setWebsiteResearchUrl(event.target.value)}
+                          />
+                        </label>
+                        <p className="muted evidence-empty">
+                          Paste a website. The app fetches useful pages, stores them in Sources found, and refreshes extracted facts.
+                        </p>
+                        <button className="primary" disabled={researchingWebsite} type="submit">
+                          {researchingWebsite ? 'Researching...' : 'Research website'}
+                        </button>
+                      </form>
+                    </div>
+                  </details>
 
                   <section className="evidence-panel">
                     <div className="workflow-card">
                       <div className="section-heading">
-                        <p>Certifications</p>
-                        <span>{supplier.certifications.length} records</span>
-                      </div>
-                      <CompactCertificationList certifications={supplier.certifications} />
-                      {latestEvidenceSnapshot && (
-                        <SnapshotList title="Expected certifications and documents" items={latestEvidenceSnapshot.expectedEvidence} />
-                      )}
-                    </div>
-
-                    <div className="workflow-card">
-                      <div className="section-heading">
-                        <p>Evidence</p>
+                        <p>Sources found</p>
                         <span>{supplier.sourceChecks.length} sources</span>
                       </div>
-                      <CompactSourceCheckList sourceChecks={supplier.sourceChecks} />
+                      <CompactSourceCheckList
+                        deletingSourceId={deletingSourceId}
+                        sourceChecks={supplier.sourceChecks}
+                        onDelete={removeSource}
+                        onEdit={startEditingSource}
+                      />
                     </div>
                   </section>
 
@@ -728,22 +1116,45 @@ function App() {
                 </>
               )}
 
-              {activeReviewStep === 'risk' && (
+              {activeReviewStep === 'questions' && (
                 <>
                   <section className="risk-memo-panel">
                     <div className="section-heading">
-                      <p>Risk memo</p>
-                      <span>{latestAssessment ? latestAssessment.riskLevel : 'No assessment'}</span>
+                      <p>Open questions</p>
+                      <span>{openQuestionItems.length} unresolved</span>
                     </div>
-                    <div className="risk-memo-headline">
-                      <RiskBadge level={latestAssessment?.riskLevel ?? 'Unknown'} />
-                      <strong>{formatRiskAssessmentScore(latestAssessment)}</strong>
+                    <div className="open-question-toolbar">
+                      <p>Re-check uses stored facts and sources first. It does not repeat website research.</p>
+                      <button
+                        className="primary"
+                        disabled={recheckingOpenQuestions || openQuestionItems.length === 0}
+                        type="button"
+                        onClick={() => void recheckCurrentOpenQuestions()}
+                      >
+                        {recheckingOpenQuestions ? 'Re-checking...' : 'Re-check with AI'}
+                      </button>
                     </div>
-                    <ul>
-                      {riskMemoItems.map((item) => (
-                        <li key={item}>{item}</li>
-                      ))}
-                    </ul>
+                    {openQuestionItems.length === 0 ? (
+                      <p className="muted evidence-empty">No open questions found from the current research.</p>
+                    ) : (
+                      <ul>
+                        {openQuestionItems.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    )}
+                    {openQuestionRecheckResult && (
+                      <div className="open-question-results">
+                        {openQuestionRecheckResult.map((item) => (
+                          <article className={`open-question-result open-question-${item.status}`} key={`${item.status}-${item.question}`}>
+                            <strong>{item.status === 'resolved' ? 'Resolved' : 'Still open'}</strong>
+                            <span>{item.question}</span>
+                            <p>{item.evidenceNote}</p>
+                            {item.sourceName && <small>{item.sourceName}</small>}
+                          </article>
+                        ))}
+                      </div>
+                    )}
                   </section>
 
                   <details className="secondary-details">
@@ -751,14 +1162,14 @@ function App() {
                     {latestEvidenceQuality && (
                       <section className="quality-panel">
                         <div className="section-heading">
-                          <p>Verification status</p>
-                          <span>{latestEvidenceQuality.band}</span>
+                          <p>Source status</p>
+                          <span>{latestEvidenceQuality.hasBlockedOrFailedSource ? 'Some source issues' : 'No blocked source flags'}</span>
                         </div>
                         <div className="quality-grid">
-                          <StatusField label="Evidence strength" value={`${latestEvidenceQuality.score}/100`} />
-                          <StatusField label="Certification verified" value={formatBoolean(latestEvidenceQuality.hasVerifiedCertification)} />
-                          <StatusField label="Registration evidence" value={formatBoolean(latestEvidenceQuality.hasReachableRegistrySource)} />
-                          <StatusField label="Tax evidence" value={formatBoolean(latestEvidenceQuality.hasReachableVatSource)} />
+                          <StatusField label="Website source" value={formatBoolean(latestEvidenceQuality.hasReachableWebsite)} />
+                          <StatusField label="Company source" value={formatBoolean(latestEvidenceQuality.hasReachableRegistrySource)} />
+                          <StatusField label="Tax/company clue" value={formatBoolean(latestEvidenceQuality.hasReachableVatSource)} />
+                          <StatusField label="Blocked or failed source" value={formatBoolean(latestEvidenceQuality.hasBlockedOrFailedSource)} />
                         </div>
                       </section>
                     )}
@@ -770,8 +1181,8 @@ function App() {
                           <span>{latestEvidenceSnapshot.supplierProfile.isSparseInput ? 'Limited public profile' : 'Detailed public profile'}</span>
                         </div>
                         <div className="supplier-intelligence-grid">
-                          <StatusField label="Profile completeness" value={`${latestEvidenceSnapshot.supplierProfile.inputDepth}/7`} />
-                          <StatusField label="Current assessment" value={latestEvidenceSnapshot.riskDecision.reason} />
+                          <StatusField label="Profile depth" value={latestEvidenceSnapshot.supplierProfile.isSparseInput ? 'Limited' : 'Detailed'} />
+                          <StatusField label="Research note" value={latestEvidenceSnapshot.riskDecision.reason} />
                         </div>
                         <p className="company-description">{latestEvidenceSnapshot.companySummary.description}</p>
                         <SnapshotList title="External evidence" items={latestEvidenceSnapshot.companySummary.externalHighlights} />
@@ -782,7 +1193,7 @@ function App() {
                   </details>
 
                   <details className="secondary-details">
-                    <summary>Full risk assessment text</summary>
+                    <summary>Full research memo text</summary>
                     <section className="workspace read-only-workspace">
                       <div className="assessment-list">
                         {assessments.length === 0 ? (
@@ -791,9 +1202,8 @@ function App() {
                           assessments.map((assessment) => (
                             <article className="assessment" key={assessment.id}>
                               <div className="assessment-topline">
-                                <RiskBadge level={assessment.riskLevel} />
-                                <strong>{formatRiskAssessmentScore(assessment)}</strong>
-                                <span>Supplier intelligence</span>
+                                <strong>Research memo</strong>
+                                <span>{formatShortDate(assessment.createdAt)}</span>
                               </div>
                               <p className="assessment-summary">{assessment.summaryMarkdown}</p>
                               <details className="assessment-full-text">
@@ -809,27 +1219,13 @@ function App() {
                 </>
               )}
 
-              {activeReviewStep === 'report' && (
+              {activeReviewStep === 'connections' && (
                 <section className="report-panel">
                   <div className="section-heading">
-                    <p>Report</p>
-                    <span>{hasConfirmedIdentity ? 'Draft-ready' : 'Blocked'}</span>
+                    <p>Connections</p>
+                    <span>{supplierConnections.length} related suppliers</span>
                   </div>
-                  <div className="report-grid">
-                    <StatusField label="Supplier profile" value={supplier.name} />
-                    <StatusField label="Confirmed identity" value={hasConfirmedIdentity ? 'Yes' : 'No'} />
-                    <StatusField label="Evidence sources" value={`${supplier.sourceChecks.length}`} />
-                    <StatusField label="Risk decision" value={latestAssessment ? latestAssessment.riskLevel : 'None'} />
-                  </div>
-                  {latestEvidenceSnapshot ? (
-                    <SnapshotList title="Recommended next checks" items={latestEvidenceSnapshot.recommendedNextChecks} />
-                  ) : (
-                    <p className="muted evidence-empty">No report recommendations available yet.</p>
-                  )}
-
-                  {supplierAnalytics && (
-                    <SupplierAnalyticsPanel analytics={supplierAnalytics} />
-                  )}
+                  <SupplierConnectionPanel connections={supplierConnections} supplier={supplier} />
 
                   <details className="secondary-details">
                     <summary>Technical details</summary>
@@ -850,8 +1246,60 @@ function App() {
                         <StatusField label="Provider" value={localModelStatus?.provider ?? 'Unknown'} />
                         <StatusField label="Default model" value={localModelStatus?.defaultModel ?? 'Unknown'} />
                         <StatusField label="Base URL" value={localModelStatus?.baseUrl ?? 'Unknown'} />
-                        <StatusField label="Evidence score" value={`${evidenceCompletenessScore}/3`} />
+                        <StatusField
+                          label="API key"
+                          value={
+                            localModelStatus?.isApiKeyConfigured
+                              ? `Configured (${localModelStatus.apiKeySource}${localModelStatus.apiKeyFingerprint ? ` ${localModelStatus.apiKeyFingerprint}` : ''})`
+                              : 'Missing'
+                          }
+                        />
                       </div>
+                      <form className="runtime-key-form" onSubmit={saveOpenRouterKeyForRun}>
+                        <label>
+                          OpenRouter API key
+                          <input
+                            autoComplete="off"
+                            placeholder="sk-or-..."
+                            type="password"
+                            value={openRouterApiKey}
+                            onChange={(event) => setOpenRouterApiKey(event.target.value)}
+                          />
+                        </label>
+                        <div className="runtime-key-actions">
+                          <button
+                            className="primary"
+                            disabled={savingOpenRouterKey || openRouterApiKey.trim().length === 0}
+                            type="submit"
+                          >
+                            {savingOpenRouterKey ? 'Saving...' : 'Save key for this run'}
+                          </button>
+                          <button
+                            className="ghost"
+                            disabled={savingOpenRouterKey}
+                            type="button"
+                            onClick={() => void testOpenRouterConnection()}
+                          >
+                            {savingOpenRouterKey ? 'Testing...' : 'Test connection'}
+                          </button>
+                          <button
+                            className="ghost"
+                            disabled={savingOpenRouterKey || !localModelStatus?.isApiKeyConfigured}
+                            type="button"
+                            onClick={() => void clearOpenRouterKeyForRun()}
+                          >
+                            Clear runtime key
+                          </button>
+                        </div>
+                      </form>
+                      {runtimeKeyMessage && (
+                        <p className={`runtime-key-message runtime-key-${runtimeKeyMessage.tone}`}>
+                          {runtimeKeyMessage.text}
+                        </p>
+                      )}
+                      <p className="runtime-key-note">
+                        Saving replaces the runtime key. Clearing it removes the key for this backend run.
+                      </p>
                       {localModelStatus?.errorMessage && <p className="local-model-error">{localModelStatus.errorMessage}</p>}
                       {localModelStatus?.models.length ? (
                         <div className="model-list">
@@ -867,25 +1315,22 @@ function App() {
                 </section>
               )}
             </section>
+
+            {activeAnalysisJob && (
+              <AnalysisRunPanel
+                analytics={supplierAnalytics}
+                job={activeAnalysisJob}
+                matchCandidates={matchCandidates}
+                supplier={supplier}
+                latestAssessment={latestAssessment}
+              />
+            )}
           </>
         ) : (
           <p className="muted">Select a supplier.</p>
         )}
       </section>
     </main>
-  )
-}
-
-function RiskBadge({ level }: { level: RiskLevel }) {
-  return <span className={`risk-badge risk-${level.toLowerCase()}`}>{level}</span>
-}
-
-function WorkflowStep({ isDone, label, value }: { isDone: boolean; label: string; value: string }) {
-  return (
-    <div className={isDone ? 'workflow-step done' : 'workflow-step'}>
-      <strong>{label}</strong>
-      <span>{value}</span>
-    </div>
   )
 }
 
@@ -914,15 +1359,6 @@ function ReviewStepButton({
   )
 }
 
-function Metric({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="metric">
-      <strong>{value}</strong>
-      <span>{label}</span>
-    </div>
-  )
-}
-
 function StatusField({ label, value }: { label: string; value: string }) {
   return (
     <div className="status-field">
@@ -942,36 +1378,119 @@ function KnownInformationList({ items }: { items: string[] }) {
   )
 }
 
-function TrustBreakdown({
-  compact = false,
-  overallTrustScore,
-  items,
+function SupplierBriefingMemo({
+  displayKnownInformation,
+  latestEvidenceSnapshot,
+  openQuestionItems,
+  supplier,
 }: {
-  compact?: boolean
-  overallTrustScore: number
-  items: TrustBreakdownItem[]
+  displayKnownInformation: string[]
+  latestEvidenceSnapshot: EvidenceSnapshot | null
+  openQuestionItems: string[]
+  supplier: SupplierDetail
+}) {
+  const companySummary = buildBriefCompanySummary(supplier, latestEvidenceSnapshot)
+    ?? 'No supplier summary has been extracted yet. Add sources or research the website to build the briefing.'
+  const productsAndServices = buildFactSectionItems(supplier.supplierFacts, ['ProductsAndServices'])
+  const locationsAndMarkets = distinctText([
+    ...buildFactSectionItems(supplier.supplierFacts, ['LocationsAndMarkets', 'LegalIdentity', 'RegistryEvidence']),
+    ...buildLocationCluesFromSources(supplier.sourceChecks),
+  ]).slice(0, 5)
+  const sourceFindings = distinctText([
+    ...(latestEvidenceSnapshot?.companySummary.ownWebsiteHighlights ?? []),
+    ...(latestEvidenceSnapshot?.companySummary.externalHighlights ?? []),
+    ...buildFactSectionItems(supplier.supplierFacts, [
+      'WebsiteEvidence',
+      'RegistryEvidence',
+      'VatEvidence',
+      'QualitySystem',
+      'SustainabilityAndCompliance',
+      'CertificationClaim',
+    ]),
+  ].map((item) => formatBriefingBullet(item))).slice(0, 6)
+  const sourcesUsed = buildBriefingSourcesUsed(supplier.sourceChecks)
+
+  return (
+    <section className="briefing-paper">
+      <header className="briefing-paper-header">
+        <div>
+          <span>Supplier research memo</span>
+          <h2>{supplier.name}</h2>
+          <p>
+            {supplier.countryCode} · {supplier.industry}
+          </p>
+        </div>
+        <dl>
+          <div>
+            <dt>Website</dt>
+            <dd>{supplier.websiteUrl ? readHostname(supplier.websiteUrl) : 'Not provided'}</dd>
+          </div>
+          <div>
+            <dt>Sources</dt>
+            <dd>{supplier.sourceChecks.length}</dd>
+          </div>
+          <div>
+            <dt>Facts</dt>
+            <dd>{supplier.supplierFacts.length}</dd>
+          </div>
+        </dl>
+      </header>
+
+      <section className="briefing-paper-section briefing-summary">
+        <h3>What this supplier appears to do</h3>
+        <p>{companySummary}</p>
+      </section>
+
+      <div className="briefing-paper-grid">
+        <BriefingMemoList
+          emptyText="No product or service details extracted yet."
+          items={productsAndServices.length > 0 ? productsAndServices : displayKnownInformation.slice(0, 3)}
+          title="Products / services found"
+        />
+        <BriefingMemoList
+          emptyText="No location or market footprint details extracted yet."
+          items={locationsAndMarkets}
+          title="Locations / market footprint"
+        />
+      </div>
+
+      <BriefingMemoList
+        emptyText="No concrete source findings yet."
+        items={sourceFindings}
+        title="Important source findings"
+      />
+
+      <BriefingMemoList
+        emptyText="No sources used yet."
+        items={sourcesUsed}
+        title="Sources used"
+      />
+    </section>
+  )
+}
+
+function BriefingMemoList({
+  emptyText,
+  items,
+  title,
+}: {
+  emptyText: string
+  items: string[]
+  title: string
 }) {
   return (
-    <div className={compact ? 'trust-breakdown compact' : 'trust-breakdown'}>
-      <div className="trust-score-header">
-        <strong>Trust score</strong>
-        <span>{overallTrustScore}/100</span>
-      </div>
-      <div className="trust-bar-list">
-        {items.map((item) => (
-          <div className="trust-bar-row" key={item.label}>
-            <div className="trust-bar-label">
-              <strong>{item.label}</strong>
-              <span>{item.status}</span>
-            </div>
-            <div className="trust-bar-track" aria-label={`${item.label}: ${item.score} out of 100`}>
-              <span style={{ width: `${item.score}%` }} />
-            </div>
-            {!compact && <p>{item.explanation}</p>}
-          </div>
-        ))}
-      </div>
-    </div>
+    <section className="briefing-paper-section">
+      <h3>{title}</h3>
+      {items.length === 0 ? (
+        <p className="briefing-empty">{emptyText}</p>
+      ) : (
+        <ul>
+          {items.map((item, index) => (
+            <li key={`${title}-${item}-${index}`}>{item}</li>
+          ))}
+        </ul>
+      )}
+    </section>
   )
 }
 
@@ -979,18 +1498,134 @@ function SupplierAnalyticsPanel({ analytics }: { analytics: SupplierAnalytics })
   return (
     <section className="analytics-panel">
       <div className="section-heading">
-        <p>Analytics</p>
-        <span>{analytics.overallTrustScore}/100 trust</span>
+        <p>Research activity</p>
+        <span>{analytics.timeline.length} events</span>
       </div>
       <div className="analytics-grid">
-        <TrustBreakdown overallTrustScore={analytics.overallTrustScore} items={analytics.trustBreakdown} />
         <SourceMixList items={analytics.sourceMix} />
       </div>
       <div className="analytics-grid">
-        <SnapshotList title="Strongest signals" items={analytics.strongestSignals} />
-        <SnapshotList title="Weakest gaps" items={analytics.weakestGaps} />
+        <SnapshotList title="Useful findings" items={analytics.strongestSignals} />
+        <SnapshotList title="Still unclear" items={analytics.weakestGaps} />
       </div>
       <TimelineList items={analytics.timeline} />
+    </section>
+  )
+}
+
+function SupplierConnectionPanel({
+  connections,
+  supplier,
+}: {
+  connections: SupplierConnection[]
+  supplier: SupplierDetail
+}) {
+  if (connections.length === 0) {
+    return (
+      <p className="muted evidence-empty">
+        No related suppliers found yet. Add more analysed suppliers to build a useful comparison map.
+      </p>
+    )
+  }
+
+  return (
+    <div className="connection-workspace">
+      <SupplierConnectionGraph connections={connections} supplier={supplier} />
+      <div className="connection-list">
+        {connections.map((connection) => (
+          <article className="connection-card" id={`connection-${connection.supplierId}`} key={connection.supplierId}>
+            <div className="connection-card-title">
+              <div>
+                <strong>{connection.supplierName}</strong>
+                <span>
+                  {connection.countryCode} · {connection.industry}
+                </span>
+              </div>
+              <small>{connection.strengthLabel}</small>
+            </div>
+            <ul>
+              {connection.reasons.slice(0, 3).map((reason) => (
+                <li key={reason}>{reason}</li>
+              ))}
+            </ul>
+            {connection.sharedTerms.length > 0 && (
+              <div className="connection-terms">
+                {connection.sharedTerms.map((term) => (
+                  <span key={term}>{term}</span>
+                ))}
+              </div>
+            )}
+            {connection.websiteUrl && (
+              <a className="source-open-link" href={connection.websiteUrl} rel="noreferrer" target="_blank">
+                Open supplier website
+              </a>
+            )}
+          </article>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function SupplierConnectionGraph({
+  connections,
+  supplier,
+}: {
+  connections: SupplierConnection[]
+  supplier: SupplierDetail
+}) {
+  const visibleConnections = connections.slice(0, 5)
+  const center = { x: 110, y: 92 }
+  const nodeStartX = 270
+  const nodeGap = 110
+  const nodes = visibleConnections.map((connection, index) => {
+    const rowOffset = index % 2 === 0 ? -28 : 28
+
+    return {
+      connection,
+      x: nodeStartX + index * nodeGap,
+      y: center.y + rowOffset,
+    }
+  })
+
+  return (
+    <section className="connection-graph-panel">
+      <div className="section-heading">
+        <p>Relationship map</p>
+        <span>{visibleConnections.length} visible</span>
+      </div>
+      <svg className="connection-graph" role="img" viewBox="0 0 760 184">
+        <title>Supplier relationship map for {supplier.name}</title>
+        {nodes.map((node) => (
+          <g key={`edge-${node.connection.supplierId}`}>
+            <line
+              className={`connection-edge connection-edge-${connectionStrengthClass(node.connection.strengthLabel)}`}
+              x1={center.x}
+              x2={node.x}
+              y1={center.y}
+              y2={node.y}
+            />
+          </g>
+        ))}
+
+        <g className="connection-node connection-node-main">
+          <rect height="52" rx="0" width="150" x={center.x - 75} y={center.y - 26} />
+          <text x={center.x} y={center.y - 3}>{shortenText(supplier.name, 18)}</text>
+          <text className="connection-node-subtitle" x={center.x} y={center.y + 15}>selected supplier</text>
+        </g>
+
+        {nodes.map((node) => (
+          <a href={`#connection-${node.connection.supplierId}`} key={`node-${node.connection.supplierId}`}>
+            <g className={`connection-node connection-node-${connectionStrengthClass(node.connection.strengthLabel)}`}>
+              <rect height="48" rx="0" width="96" x={node.x - 48} y={node.y - 24} />
+              <text x={node.x} y={node.y - 4}>{shortenText(node.connection.supplierName, 13)}</text>
+              <text className="connection-node-subtitle" x={node.x} y={node.y + 13}>
+                {node.connection.strengthLabel.replace(' similarity', '')}
+              </text>
+            </g>
+          </a>
+        ))}
+      </svg>
     </section>
   )
 }
@@ -1033,10 +1668,10 @@ function AnalysisRunPanel({
           ))}
         </div>
         <div className="analysis-live-summary">
-          <StatusField label="Evidence found" value={`${reachableSourceCount} reachable / ${failedSourceCount} failed`} />
+          <StatusField label="Sources found" value={`${reachableSourceCount} reachable / ${failedSourceCount} failed`} />
           <StatusField label="Facts extracted" value={`${supplier.supplierFacts.length}`} />
-          <StatusField label="Identity candidates" value={`${matchCandidates.length}`} />
-          <StatusField label="Trust score" value={analytics ? `${analytics.overallTrustScore}/100` : 'Pending'} />
+          <StatusField label="Research memo" value={latestAssessment ? 'Available' : 'Pending'} />
+          <StatusField label="Connections" value={analytics ? 'Ready after refresh' : 'Pending'} />
         </div>
       </div>
       {job.errorMessage && <p className="analysis-run-error">{job.errorMessage}</p>}
@@ -1170,7 +1805,7 @@ function MatchCandidateList({
                   onClick={() => onConfirm(candidate.id)}
                   type="button"
                 >
-                  {candidate.status === 'Confirmed' ? 'Saved identity' : isReviewing ? 'Saving...' : 'Save as identity'}
+                  {candidate.status === 'Confirmed' ? 'Saved match' : isReviewing ? 'Saving...' : 'Save match'}
                 </button>
                 <button
                   className="ghost"
@@ -1227,7 +1862,7 @@ function buildAnalysisStages({
     sourceCheck.sourceName.toLowerCase().includes('website'),
   )
   const factsExtracted = supplier.supplierFacts.length > 0
-  const riskMemoReady = Boolean(latestAssessment)
+  const researchMemoReady = Boolean(latestAssessment)
   const analyticsReady = Boolean(analytics)
 
   return [
@@ -1246,7 +1881,7 @@ function buildAnalysisStages({
       }),
     },
     {
-      label: 'Public evidence',
+      label: 'Public sources',
       detail: reachableSourceCount > 0 ? `${reachableSourceCount} reachable source${reachableSourceCount === 1 ? '' : 's'}` : 'Searching sources',
       status: stageStatus({
         done: reachableSourceCount > 0 || isCompleted,
@@ -1264,29 +1899,20 @@ function buildAnalysisStages({
       }),
     },
     {
-      label: 'Risk memo',
-      detail: latestAssessment ? `${latestAssessment.riskLevel} / ${formatRiskAssessmentScore(latestAssessment)}` : 'Not generated yet',
+      label: 'Research memo',
+      detail: latestAssessment ? 'Open questions summarized' : 'Not generated yet',
       status: stageStatus({
-        done: riskMemoReady || isCompleted,
+        done: researchMemoReady || isCompleted,
         active: progress.includes('risk memo'),
         isFailed,
       }),
     },
     {
-      label: 'Analytics refreshed',
-      detail: analytics ? `${analytics.overallTrustScore}/100 trust score` : 'Waiting for analysis data',
+      label: 'Briefing refreshed',
+      detail: analytics ? 'Sources and timeline updated' : 'Waiting for analysis data',
       status: stageStatus({
         done: analyticsReady && isCompleted,
         active: progress.includes('analytics'),
-        isFailed,
-      }),
-    },
-    {
-      label: 'Identity review',
-      detail: matchCandidates.length > 0 ? `${matchCandidates.length} candidate${matchCandidates.length === 1 ? '' : 's'} available` : 'Can be reviewed after evidence',
-      status: stageStatus({
-        done: matchCandidates.some((candidate) => candidate.status === 'Confirmed'),
-        active: matchCandidates.some((candidate) => candidate.status === 'Proposed'),
         isFailed,
       }),
     },
@@ -1367,6 +1993,100 @@ function buildVisibleSuppliers(items: SupplierSummary[]) {
   return [...visible.values()]
 }
 
+function groupSuppliersByIndustry(items: SupplierSummary[], folderOrder: string[]) {
+  const groups = new Map<string, SupplierSummary[]>()
+
+  for (const item of items) {
+    const key = item.industry.trim() || 'Unsorted'
+    groups.set(key, [...(groups.get(key) ?? []), item])
+  }
+
+  const orderIndex = new Map(folderOrder.map((industry, index) => [industry, index]))
+
+  return [...groups.entries()]
+    .map(([industry, suppliers]) => ({
+      industry,
+      suppliers: [...suppliers].sort((left, right) => left.name.localeCompare(right.name)),
+    }))
+    .sort((left, right) => {
+      const leftIndex = orderIndex.get(left.industry)
+      const rightIndex = orderIndex.get(right.industry)
+
+      if (leftIndex !== undefined && rightIndex !== undefined) {
+        return leftIndex - rightIndex
+      }
+
+      if (leftIndex !== undefined) {
+        return -1
+      }
+
+      if (rightIndex !== undefined) {
+        return 1
+      }
+
+      return left.industry.localeCompare(right.industry)
+    })
+}
+
+function readStoredFolderOrder() {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(supplierFolderOrderStorageKey) ?? '[]')
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function writeStoredFolderOrder(order: string[]) {
+  window.localStorage.setItem(supplierFolderOrderStorageKey, JSON.stringify(order))
+}
+
+function readResolvedOpenQuestions(supplierId: number) {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(resolvedOpenQuestionsKey(supplierId)) ?? '[]')
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function writeResolvedOpenQuestions(supplierId: number, questions: string[]) {
+  window.localStorage.setItem(resolvedOpenQuestionsKey(supplierId), JSON.stringify(questions))
+}
+
+function resolvedOpenQuestionsKey(supplierId: number) {
+  return `${resolvedOpenQuestionsStoragePrefix}:${supplierId}`
+}
+
+function normalizeQuestionKey(value: string) {
+  return value.trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
+function reorderIndustryFolders(
+  visibleIndustries: string[],
+  currentOrder: string[],
+  sourceIndustry: string,
+  targetIndustry: string,
+) {
+  const visibleSet = new Set(visibleIndustries)
+  const orderedVisible = [
+    ...currentOrder.filter((industry) => visibleSet.has(industry)),
+    ...visibleIndustries.filter((industry) => !currentOrder.includes(industry)).sort((left, right) => left.localeCompare(right)),
+  ].filter((industry, index, order) => order.indexOf(industry) === index)
+  const withoutSource = orderedVisible.filter((industry) => industry !== sourceIndustry)
+  const targetIndex = withoutSource.indexOf(targetIndustry)
+
+  if (targetIndex === -1) {
+    return orderedVisible
+  }
+
+  return [
+    ...withoutSource.slice(0, targetIndex),
+    sourceIndustry,
+    ...withoutSource.slice(targetIndex),
+  ]
+}
+
 function buildSupplierIdentityKey(item: SupplierSummary) {
   return [
     normalizeIdentityPart(item.name),
@@ -1429,11 +2149,8 @@ function buildKnownInformation({
   latestEvidenceQuality: EvidenceQuality | null
   reachableSourceCount: number
 }) {
-  const verifiedCertifications = supplier.certifications.filter((certification) => certification.isVerified)
   const items = [
-    confirmedIdentity
-      ? `Confirmed identity: ${formatCandidateDisplayName(confirmedIdentity.candidateName)}`
-      : `Supplier record: ${supplier.name} in ${supplier.countryCode} for ${supplier.industry}`,
+    `Supplier record: ${supplier.name} in ${supplier.countryCode} for ${supplier.industry}`,
   ]
 
   if (supplier.websiteUrl || confirmedIdentity?.websiteUrl) {
@@ -1441,62 +2158,72 @@ function buildKnownInformation({
   }
 
   if (latestEvidenceQuality?.hasReachableRegistrySource) {
-    items.push('Registry evidence found in public sources')
+    items.push('Company-information source found in public research')
   } else {
-    items.push('Legal registration evidence still needs confirmation')
+    items.push('Company-information source still needs confirmation')
   }
 
   items.push(
-    verifiedCertifications.length > 0
-      ? `Verified certifications: ${verifiedCertifications.map((certification) => certification.standard).join(', ')}`
-      : 'No verified certification saved yet',
-  )
-
-  items.push(
     reachableSourceCount > 0
-      ? `${reachableSourceCount} reachable public evidence source${reachableSourceCount === 1 ? '' : 's'}`
+      ? `${reachableSourceCount} reachable public source${reachableSourceCount === 1 ? '' : 's'}`
       : 'No reachable public evidence source yet',
   )
 
   if (latestAssessment) {
-    items.push(`Current risk view: ${latestAssessment.riskLevel}`)
+    items.push('Research memo available in Open questions')
   }
 
   return items
 }
 
-function buildRiskMemoItems({
-  hasConfirmedIdentity,
+function buildBriefingFacts(
+  supplier: SupplierDetail,
+  knownSupplierFacts: string[],
+  latestEvidenceSnapshot: EvidenceSnapshot | null,
+) {
+  const items = [
+    `Supplier: ${supplier.name}`,
+    `Market context: ${supplier.countryCode} · ${supplier.industry}`,
+  ]
+
+  if (supplier.websiteUrl) {
+    items.push(`Website: ${readHostname(supplier.websiteUrl)}`)
+  }
+
+  items.push(...knownSupplierFacts.slice(0, 6))
+
+  if (latestEvidenceSnapshot?.companySummary.description) {
+    items.push(`Summary: ${shortenText(latestEvidenceSnapshot.companySummary.description, 260)}`)
+  }
+
+  return distinctText(items).slice(0, 10)
+}
+
+function buildOpenQuestionItems({
+  displayMissingInformation,
   latestAssessment,
-  latestEvidenceQuality,
+  latestEvidenceSnapshot,
   nextEvidenceItems,
 }: {
-  hasConfirmedIdentity: boolean
+  displayMissingInformation: string[]
   latestAssessment: RiskAssessment | undefined
-  latestEvidenceQuality: EvidenceQuality | null
+  latestEvidenceSnapshot: EvidenceSnapshot | null
   nextEvidenceItems: string[]
 }) {
   const items = [
-    hasConfirmedIdentity
-      ? 'The supplier identity has been saved, so evidence can be interpreted against a selected entity.'
-      : 'The supplier identity is not saved yet, so risk is provisional.',
+    ...displayMissingInformation,
+    ...nextEvidenceItems,
   ]
 
-  if (latestAssessment) {
-    items.push(`Latest stored risk decision: ${latestAssessment.riskLevel} with ${formatRiskAssessmentScore(latestAssessment).toLowerCase()}.`)
-  } else {
-    items.push('No stored risk decision exists yet.')
+  if (!latestAssessment) {
+    items.push('No research memo has been generated yet.')
   }
 
-  if (latestEvidenceQuality) {
-    items.push(`Evidence quality is ${latestEvidenceQuality.band.toLowerCase()} at ${latestEvidenceQuality.score}/100.`)
+  if (latestEvidenceSnapshot?.supplierProfile.isSparseInput) {
+    items.push('The public profile is still limited, so the briefing should be treated as incomplete.')
   }
 
-  if (nextEvidenceItems.length > 0) {
-    items.push(`Main blocker: ${nextEvidenceItems[0]}`)
-  }
-
-  return items
+  return distinctText(items).slice(0, 8)
 }
 
 function buildKnownSupplierFacts(facts: SupplierFact[]) {
@@ -1504,6 +2231,151 @@ function buildKnownSupplierFacts(facts: SupplierFact[]) {
     .filter((fact) => fact.factType !== 'MissingEvidence' && fact.factType !== 'SourceLimitation')
     .map((fact) => `${formatFactType(fact.factType)}: ${shortenText(fact.value, 260)}`))
     .slice(0, 8)
+}
+
+function buildBriefCompanySummary(
+  supplier: SupplierDetail,
+  latestEvidenceSnapshot: EvidenceSnapshot | null,
+) {
+  const candidates = [
+    latestEvidenceSnapshot?.companySummary.description,
+    ...buildFactSectionItems(supplier.supplierFacts, ['CompanyDescription', 'IndustryProfile']),
+  ].filter((item): item is string => Boolean(item && item.trim()))
+
+  return candidates
+    .map((item) => formatBriefingSentence(item, 240))
+    .find(Boolean) ?? null
+}
+
+function buildFactSectionItems(facts: SupplierFact[], factTypes: string[]) {
+  const allowedTypes = new Set(factTypes)
+
+  return distinctText(safeArray(facts)
+    .filter((fact) => allowedTypes.has(fact.factType))
+    .sort(compareSupplierFacts)
+    .map((fact) => formatBriefingBullet(fact.value)))
+    .filter(Boolean)
+    .slice(0, 6)
+}
+
+function buildLocationCluesFromSources(sourceChecks: SourceCheck[]) {
+  const locationTerms = [
+    'address',
+    'headquartered',
+    'headquarters',
+    'located',
+    'location',
+    'registered',
+    'market',
+    'markets',
+    'city',
+    'province',
+    'district',
+    'country',
+    'china',
+    'germany',
+    'usa',
+    'europe',
+    'global',
+  ]
+
+  return distinctText(sourceChecks
+    .flatMap((sourceCheck) => splitIntoSentences(sourceCheck.notes))
+    .filter((sentence) => locationTerms.some((term) => sentence.toLowerCase().includes(term)))
+    .map((sentence) => formatBriefingBullet(sentence)))
+    .slice(0, 4)
+}
+
+function formatBriefingSentence(value: string, maxLength: number) {
+  const cleaned = cleanBriefingText(value)
+  const usefulSentences = splitIntoSentences(cleaned)
+    .filter((sentence) => !looksLikeMetaSentence(sentence))
+    .slice(0, 2)
+  const sentence = usefulSentences.length > 0 ? usefulSentences.join(' ') : cleaned
+
+  return shortenText(sentence, maxLength)
+}
+
+function formatBriefingBullet(value: string) {
+  const cleaned = cleanBriefingText(value)
+  const usefulSentence = splitIntoSentences(cleaned)
+    .find((sentence) => !looksLikeMetaSentence(sentence)) ?? cleaned
+
+  return shortenText(usefulSentence, 180)
+}
+
+function cleanBriefingText(value: string) {
+  return value
+    .replace(/\*\*/g, '')
+    .replace(/^\s*[-•]\s*/, '')
+    .replace(/\bReached source with HTTP 200\.\s*/gi, '')
+    .replace(/\bSource URLs?:.*$/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function splitIntoSentences(value: string) {
+  return value
+    .split(/(?<=[.!?])\s+|;\s+|\s+-\s+/)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length >= 20)
+}
+
+function looksLikeMetaSentence(value: string) {
+  const lower = value.toLowerCase()
+
+  return lower.includes('no source urls') ||
+    lower.includes('source urls') ||
+    lower.includes('evidence quality') ||
+    lower.includes('recommended next checks') ||
+    lower.includes('internal calculation')
+}
+
+function compareSupplierFacts(left: SupplierFact, right: SupplierFact) {
+  return factConfidenceRank(right.confidence) - factConfidenceRank(left.confidence) ||
+    Date.parse(right.createdAt) - Date.parse(left.createdAt)
+}
+
+function factConfidenceRank(value: string) {
+  if (value === 'High') {
+    return 3
+  }
+
+  if (value === 'Medium') {
+    return 2
+  }
+
+  return 1
+}
+
+function buildBriefingSourcesUsed(sourceChecks: SourceCheck[]) {
+  return [...sourceChecks]
+    .sort(compareSourceChecks)
+    .slice(0, 8)
+    .map((sourceCheck) => {
+      const host = readHostname(sourceCheck.url) ?? sourceCheck.url
+      return `${sourceCheck.sourceName} (${formatSourceStatus(sourceCheck.status)}): ${host}`
+    })
+}
+
+function connectionStrengthClass(value: string) {
+  if (value.toLowerCase().includes('strong')) {
+    return 'strong'
+  }
+
+  if (value.toLowerCase().includes('useful')) {
+    return 'useful'
+  }
+
+  return 'light'
+}
+
+function connectionShortReason(connection: SupplierConnection) {
+  const sharedTermReason = connection.reasons.find((reason) => reason.startsWith('Shared research terms'))
+  const sharedHostReason = connection.reasons.find((reason) => reason.startsWith('Shared source host'))
+  const reason = sharedTermReason ?? sharedHostReason ?? connection.reasons[0] ?? connection.strengthLabel
+
+  return shortenText(reason.replace('Shared research terms: ', '').replace('Shared source host: ', ''), 34)
 }
 
 function buildUsefulResearchSources(sources: ResearchSource[]) {
@@ -1619,6 +2491,12 @@ function formatBoolean(value: boolean) {
   return value ? 'Yes' : 'No'
 }
 
+function normalizeSourceStatus(value: string): SourceCheckInput['status'] {
+  return value === 'Reachable' || value === 'Blocked' || value === 'Failed' || value === 'NotChecked'
+    ? value
+    : 'NotChecked'
+}
+
 function formatShortDate(value: string) {
   const timestamp = Date.parse(value)
 
@@ -1646,6 +2524,31 @@ function formatRiskAssessmentScore(assessment: RiskAssessment | undefined) {
   return `${assessment.score}/100`
 }
 
+function buildRuntimeKeyMessage(action: 'save' | 'test', status: LocalModelStatus) {
+  if (!status.isApiKeyConfigured) {
+    return {
+      tone: 'error' as const,
+      text: 'No OpenRouter key is configured. Paste a key and save it for this run.',
+    }
+  }
+
+  if (status.isReachable) {
+    const keyLabel = status.apiKeyFingerprint ? ` using ${status.apiKeyFingerprint}` : ''
+
+    return {
+      tone: 'ok' as const,
+      text: action === 'save'
+        ? `OpenRouter key saved for this run${keyLabel}. Connection works (${status.models.length} models found).`
+        : `OpenRouter connection works${keyLabel} (${status.models.length} models found).`,
+    }
+  }
+
+  return {
+    tone: 'error' as const,
+    text: status.errorMessage ?? 'OpenRouter key is configured, but the connection test failed.',
+  }
+}
+
 function buildNextAction({
   hasConfirmedIdentity,
   loadingMatchCandidates,
@@ -1665,44 +2568,32 @@ function buildNextAction({
   status: string
   step: ReviewStep
 } {
-  if (!hasConfirmedIdentity) {
-    return {
-      title: 'Confirm supplier identity',
-      description: matchCandidateCount > 0
-        ? 'Review the proposed legal entities and confirm the one this supplier record should represent.'
-        : 'Find possible legal entities before trusting evidence, risk, or reports.',
-      buttonLabel: loadingMatchCandidates ? 'Finding matches...' : matchCandidateCount > 0 ? 'Review matches' : 'Find matches',
-      status: 'Identity blocker',
-      step: 'identity',
-    }
-  }
-
   if (nextEvidenceCount > 0) {
     return {
-      title: 'Close evidence gaps',
-      description: 'The identity is confirmed, but important verification gaps still need review.',
-      buttonLabel: 'Review evidence',
+      title: 'Review source gaps',
+      description: 'Useful research may be available, but some source or fact gaps still need attention.',
+      buttonLabel: 'Review sources',
       status: `${nextEvidenceCount} open gaps`,
-      step: 'evidence',
+      step: 'sources',
     }
   }
 
   if (!latestAssessment) {
     return {
-      title: 'Review risk',
-      description: 'Evidence is available, but no risk decision has been stored for this supplier yet.',
-      buttonLabel: 'Open risk',
-      status: 'Risk pending',
-      step: 'risk',
+      title: 'Review open questions',
+      description: 'Sources are available, but no research memo has been stored for unresolved questions yet.',
+      buttonLabel: 'Open questions',
+      status: 'Questions pending',
+      step: 'questions',
     }
   }
 
   return {
-    title: 'Prepare report',
-    description: 'The main review inputs are available. Check recommendations before exporting a report.',
-    buttonLabel: 'Open report',
+    title: 'Research briefing ready',
+    description: 'The main public research inputs are available. Review similar suppliers and recommendations.',
+    buttonLabel: 'Open connections',
     status: 'Ready',
-    step: 'report',
+    step: 'connections',
   }
 }
 
@@ -1822,33 +2713,43 @@ function AnalysisJobList({ jobs }: { jobs: AnalysisJob[] }) {
     return <p className="muted evidence-empty">No analysis jobs stored.</p>
   }
 
+  const sortedJobs = [...jobs].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+  const currentJob = sortedJobs.find(isActiveAnalysisJob) ?? sortedJobs[0]
+  const historicalJobs = sortedJobs.filter((job) => job.id !== currentJob.id)
+
   return (
     <div className="analysis-job-list">
-      {[...jobs]
-        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-        .map((job) => (
-          <article className={`analysis-job analysis-${job.status.toLowerCase()}`} key={job.id}>
-            <div>
-              <strong>{job.status}</strong>
-              <span>{job.jobType}</span>
-            </div>
-            <p>{job.progressMessage}</p>
-            {job.errorMessage && <p>{job.errorMessage}</p>}
-          </article>
+      <AnalysisJobCard job={currentJob} label={isActiveAnalysisJob(currentJob) ? 'Current run' : 'Latest run'} />
+      {historicalJobs.length > 0 && (
+        <details className="analysis-job-history">
+          <summary>{historicalJobs.length} previous run{historicalJobs.length === 1 ? '' : 's'}</summary>
+          {historicalJobs.map((job) => (
+            <AnalysisJobCard job={job} key={job.id} label="History" />
         ))}
+        </details>
+      )}
     </div>
+  )
+}
+
+function AnalysisJobCard({ job, label }: { job: AnalysisJob; label: string }) {
+  return (
+    <article className={`analysis-job analysis-${job.status.toLowerCase()}`} key={job.id}>
+      <div>
+        <strong>{label}: {job.status}</strong>
+        <span>{job.jobType}</span>
+      </div>
+      <p>{job.progressMessage}</p>
+      {job.errorMessage && <p className="analysis-job-error">{job.errorMessage}</p>}
+    </article>
   )
 }
 
 function buildNextEvidenceItems(supplier: SupplierDetail, reachableSourceCount: number) {
   const items: string[] = []
 
-  if (!supplier.certifications.some((certification) => certification.isVerified)) {
-    items.push('No verified certification found.')
-  }
-
   if (!supplier.sourceChecks.some((sourceCheck) => sourceCheck.sourceName.toLowerCase().includes('registry'))) {
-    items.push('Company registration evidence not verified.')
+    items.push('Company-information source still needs confirmation.')
   }
 
   if (reachableSourceCount === 0) {
@@ -1862,27 +2763,17 @@ function buildNextEvidenceItems(supplier: SupplierDetail, reachableSourceCount: 
   return items
 }
 
-function CompactCertificationList({ certifications }: { certifications: Certification[] }) {
-  if (certifications.length === 0) {
-    return <p className="muted evidence-empty">No verified certifications found yet.</p>
-  }
-
-  return (
-    <div className="compact-list">
-      {certifications.map((certification) => (
-        <article className="certification-item" key={certification.id}>
-          <strong>{certification.standard}</strong>
-          <span>{certification.isVerified ? 'Verified' : 'Unverified'}</span>
-          <p>{certification.issuer}</p>
-          {certification.verificationNotes && <p>{certification.verificationNotes}</p>}
-          <small>{certification.validUntil ? `Valid until ${certification.validUntil}` : 'No expiry date'}</small>
-        </article>
-      ))}
-    </div>
-  )
-}
-
-function CompactSourceCheckList({ sourceChecks }: { sourceChecks: SourceCheck[] }) {
+function CompactSourceCheckList({
+  deletingSourceId,
+  sourceChecks,
+  onDelete,
+  onEdit,
+}: {
+  deletingSourceId: number | null
+  sourceChecks: SourceCheck[]
+  onDelete: (sourceCheckId: number) => void
+  onEdit: (sourceCheck: SourceCheck) => void
+}) {
   if (sourceChecks.length === 0) {
     return <p className="muted evidence-empty">No public sources verified yet.</p>
   }
@@ -1898,9 +2789,28 @@ function CompactSourceCheckList({ sourceChecks }: { sourceChecks: SourceCheck[] 
             <article className="evidence-item" key={sourceCheck.id}>
               <div className="evidence-title-row">
                 <strong>{sourceCheck.sourceName}</strong>
-                <span className={`source-quality source-quality-${quality.level.toLowerCase()}`}>
-                  {quality.level} · {quality.score}/100
-                </span>
+                <div className="source-card-controls">
+                  <span className={`source-quality source-quality-${quality.level.toLowerCase()}`}>
+                    {quality.level}
+                  </span>
+                  <button
+                    aria-label={`Edit ${sourceCheck.sourceName}`}
+                    className="icon-action"
+                    type="button"
+                    onClick={() => onEdit(sourceCheck)}
+                  >
+                    ✏️
+                  </button>
+                  <button
+                    aria-label={`Delete ${sourceCheck.sourceName}`}
+                    className="icon-action danger"
+                    disabled={deletingSourceId === sourceCheck.id}
+                    type="button"
+                    onClick={() => onDelete(sourceCheck.id)}
+                  >
+                    -
+                  </button>
+                </div>
               </div>
               <div className="source-meta-row">
                 <span>{formatSourceStatus(sourceCheck.status)}</span>
@@ -1988,7 +2898,7 @@ function formatSourceKind(sourceCheck: SourceCheck) {
   }
 
   if (sourceName.includes('cert')) {
-    return 'certification'
+    return 'claim source'
   }
 
   return 'public source'

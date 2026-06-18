@@ -564,27 +564,23 @@ public sealed class AdaptiveSupplierAnalysisWorker(
             Do not invent certifications, sources, facts, or risk signals.
             If evidence is missing, name only supplier evidence that a user can add.
             Internal calculation fields are not missing supplier evidence.
-            Use riskDecision.level and riskDecision.score from the evidence JSON.
-            Use evidenceQuality.score and evidenceQuality.band to explain confidence.
             Use supplierFacts as the primary trusted fact list.
             Use companySummary to explain what kind of company this appears to be.
-            Prefer externalHighlights over ownWebsiteHighlights when describing the company.
-            Use supplierProfile, supplierFacts, companySummary, expectedEvidence, and recommendedNextChecks when evidence is sparse.
-            Use sourceChecks only as supporting technical evidence or to explain blocked and failed checks.
-            For the Gaps or risks section, use missingEvidenceSuggestions.
-            Keep the answer short enough for an operational UI.
+            Prefer precise product, service, location, market, website, and source facts over generic confidence commentary.
+            Write short sentences. Avoid long paragraphs. Each bullet should be one concrete fact.
+            If a location or address appears in supplierFacts, companySummary, or sourceChecks, include it under Locations / markets.
             Return markdown with exactly these sections:
             ## Company profile
-            Explain in 1 or 2 sentences what the company appears to do, using only evidence from companySummary and sourceChecks.
-            ## Risk decision
-            State the calculated risk level and score in one sentence, and say it is a draft if evidence is sparse.
-            ## Evidence used
-            Mention certifications and source checks separately. Cite only categories and names from the JSON.
-            ## Gaps or risks
-            List missing certifications, missing registry evidence, expired certifications, blocked sources, or failed sources.
+            Explain in 1 or 2 short sentences what the supplier appears to do.
+            ## Products and services
+            List up to 5 concrete product or service facts.
+            ## Locations and markets
+            List up to 5 location, address, country, shipping, export, or market facts.
+            ## Important source findings
+            List up to 5 useful facts from sourceChecks or supplierFacts.
+            ## Open questions
+            List only unclear facts that matter for quickly understanding the supplier.
             Do not list JSON field names as gaps.
-            ## Recommended next checks
-            Give 2 or 3 concrete next checks, prioritizing certification and registry evidence before broad research.
             """;
     }
 
