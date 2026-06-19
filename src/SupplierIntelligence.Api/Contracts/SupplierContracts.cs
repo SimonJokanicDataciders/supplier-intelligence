@@ -202,6 +202,19 @@ public sealed record SupplierReviewSummaryResponse(
     IReadOnlyList<string> MissingInformation,
     SupplierTrustSignalsResponse TrustSignals);
 
+public sealed record SupplierOperationsExportResponse(
+    string SourceSystem,
+    string ExternalSupplierKey,
+    string Name,
+    string Country,
+    string Industry,
+    string? WebsiteUrl,
+    string? ResearchUrl,
+    string Summary,
+    IReadOnlyList<string> KnownInformation,
+    int SourceCount,
+    DateTime ExportedAt);
+
 public sealed record SupplierReviewNextActionResponse(
     string Type,
     string Title,

@@ -461,6 +461,31 @@ public static class SupplierEndpoints
         .WithDescription("Returns a generic review summary for the selected supplier: next action, known information, missing information, and trust signals.")
         .WithName("GetSupplierReviewSummary");
 
+        suppliers.MapGet("/{id:int}/operations-export", async (
+            int id,
+            AppDbContext db,
+            CancellationToken cancellationToken) =>
+        {
+            var supplier = await db.Suppliers
+                .AsNoTracking()
+                .Include(s => s.SourceChecks)
+                .Include(s => s.ResearchSources)
+                .Include(s => s.SupplierFacts)
+                .Include(s => s.RiskAssessments)
+                .Include(s => s.MatchCandidates)
+                .AsSplitQuery()
+                .FirstOrDefaultAsync(s => s.Id == id && !s.IsArchived, cancellationToken);
+
+            return supplier is null
+                ? Results.NotFound()
+                : Results.Ok(BuildOperationsExport(supplier));
+        })
+        .Produces<SupplierOperationsExportResponse>()
+        .Produces(StatusCodes.Status404NotFound)
+        .WithSummary("Export supplier for operations")
+        .WithDescription("Returns a compact JSON payload for manual copy into operations workflows. It does not call external operations systems.")
+        .WithName("GetSupplierOperationsExport");
+
         suppliers.MapGet("/{id:int}/connections", async (
             int id,
             AppDbContext db,
@@ -1865,6 +1890,89 @@ public static class SupplierEndpoints
             knownInformation,
             missingInformation,
             trustSignals);
+    }
+
+    private static SupplierOperationsExportResponse BuildOperationsExport(Supplier supplier)
+    {
+        var latestAssessment = supplier.RiskAssessments
+            .OrderByDescending(assessment => assessment.CreatedAt)
+            .FirstOrDefault();
+        var confirmedIdentity = supplier.MatchCandidates
+            .Where(candidate => candidate.Status == SupplierMatchCandidateStatus.Confirmed)
+            .OrderByDescending(candidate => candidate.ReviewedAt ?? candidate.CreatedAt)
+            .FirstOrDefault();
+        var reachableSourceCount = supplier.SourceChecks.Count(source => source.Status == SourceCheckStatus.Reachable);
+        var hasRegistrationEvidence = supplier.SourceChecks.Any(source =>
+            source.Status == SourceCheckStatus.Reachable &&
+            IsRegistrationEvidence(source));
+        var knownInformation = BuildKnownInformation(
+            supplier,
+            confirmedIdentity,
+            latestAssessment,
+            reachableSourceCount,
+            hasRegistrationEvidence);
+
+        return new SupplierOperationsExportResponse(
+            "SupplierIntelligence",
+            $"supplier-{supplier.Id}",
+            supplier.Name,
+            supplier.CountryCode,
+            supplier.Industry,
+            supplier.WebsiteUrl,
+            FindOperationsResearchUrl(supplier),
+            BuildOperationsSummary(supplier, latestAssessment),
+            knownInformation,
+            CountStoredSourceUrls(supplier),
+            DateTime.UtcNow);
+    }
+
+    private static string BuildOperationsSummary(Supplier supplier, RiskAssessment? latestAssessment)
+    {
+        var companyFact = supplier.SupplierFacts
+            .Where(fact => fact.FactType is SupplierFactType.CompanyDescription or SupplierFactType.IndustryProfile)
+            .OrderByDescending(fact => fact.Confidence)
+            .ThenByDescending(fact => fact.CreatedAt)
+            .FirstOrDefault();
+        if (companyFact is not null)
+        {
+            return ShortenText(CleanComparisonText(companyFact.Value), 240);
+        }
+
+        if (latestAssessment is not null && !string.IsNullOrWhiteSpace(latestAssessment.SummaryMarkdown))
+        {
+            return ShortenText(CleanComparisonText(latestAssessment.SummaryMarkdown), 240);
+        }
+
+        return $"{supplier.Name} is tracked as a {supplier.Industry} supplier in {supplier.CountryCode}.";
+    }
+
+    private static string? FindOperationsResearchUrl(Supplier supplier)
+    {
+        var reachableSourceUrl = supplier.SourceChecks
+            .Where(source => source.Status == SourceCheckStatus.Reachable && !string.IsNullOrWhiteSpace(source.Url))
+            .OrderByDescending(source => source.CheckedAt)
+            .Select(source => source.Url)
+            .FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(reachableSourceUrl))
+        {
+            return reachableSourceUrl;
+        }
+
+        return supplier.ResearchSources
+            .Where(source => !string.IsNullOrWhiteSpace(source.Url))
+            .OrderByDescending(source => source.CreatedAt)
+            .Select(source => source.Url)
+            .FirstOrDefault();
+    }
+
+    private static int CountStoredSourceUrls(Supplier supplier)
+    {
+        return supplier.SourceChecks
+            .Select(source => source.Url)
+            .Concat(supplier.ResearchSources.Select(source => source.Url))
+            .Where(url => !string.IsNullOrWhiteSpace(url))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count();
     }
 
     private static List<SupplierConnectionResponse> BuildSupplierConnections(

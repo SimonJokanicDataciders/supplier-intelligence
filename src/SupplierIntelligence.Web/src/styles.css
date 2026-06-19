@@ -359,6 +359,42 @@ button:disabled {
   color: #123f86;
 }
 
+.operations-export-panel {
+  background: #eceef2;
+  border-color: #ffffff #777d86 #777d86 #ffffff;
+  border-style: solid;
+  border-width: 2px;
+  display: grid;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 8px;
+}
+
+.operations-export-message {
+  color: #111111;
+  font-size: 13px;
+  font-weight: 800;
+  margin: 0;
+}
+
+.operations-export-message.ok {
+  color: #1f5d1f;
+}
+
+.operations-export-message.warn {
+  color: #6c5200;
+}
+
+.operations-export-message.error {
+  color: #8a1111;
+}
+
+.operations-export-panel textarea {
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  min-height: 180px;
+  white-space: pre;
+}
+
 .metric-grid {
   display: grid;
   gap: 6px;

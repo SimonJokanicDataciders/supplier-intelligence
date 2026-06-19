@@ -16,6 +16,7 @@ import {
   getSupplierAnalysisJob,
   getSupplierAnalysisJobs,
   getSupplierConnections,
+  getSupplierOperationsExport,
   getSupplierMatchCandidates,
   getLocalModelStatus,
   getSupplier,
@@ -98,6 +99,8 @@ function App() {
   const [activeAnalysisJob, setActiveAnalysisJob] = useState<AnalysisJob | null>(null)
   const [openRouterApiKey, setOpenRouterApiKey] = useState('')
   const [runtimeKeyMessage, setRuntimeKeyMessage] = useState<{ tone: 'ok' | 'warn' | 'error'; text: string } | null>(null)
+  const [operationsExportMessage, setOperationsExportMessage] = useState<{ tone: 'ok' | 'warn' | 'error'; text: string } | null>(null)
+  const [operationsExportJson, setOperationsExportJson] = useState<string | null>(null)
   const [folderMessage, setFolderMessage] = useState<string | null>(null)
   const [dragOverIndustry, setDragOverIndustry] = useState<string | null>(null)
   const [rankTargetIndustry, setRankTargetIndustry] = useState<string | null>(null)
@@ -110,6 +113,7 @@ function App() {
   const [archivingSupplier, setArchivingSupplier] = useState(false)
   const [queueingAnalysis, setQueueingAnalysis] = useState(false)
   const [exportingReport, setExportingReport] = useState(false)
+  const [exportingOperations, setExportingOperations] = useState(false)
   const [savingSource, setSavingSource] = useState(false)
   const [researchingWebsite, setResearchingWebsite] = useState(false)
   const [recheckingOpenQuestions, setRecheckingOpenQuestions] = useState(false)
@@ -151,12 +155,16 @@ function App() {
       setMatchCandidates([])
       setResolvedOpenQuestions([])
       setOpenQuestionRecheckResult(null)
+      setOperationsExportMessage(null)
+      setOperationsExportJson(null)
       return
     }
 
     setActiveReviewStep('briefing')
     setResolvedOpenQuestions(readResolvedOpenQuestions(selectedSupplierId))
     setOpenQuestionRecheckResult(null)
+    setOperationsExportMessage(null)
+    setOperationsExportJson(null)
     void loadSupplier(selectedSupplierId)
     void loadReviewSummary(selectedSupplierId)
     void loadSupplierAnalytics(selectedSupplierId)
@@ -856,6 +864,43 @@ function App() {
     }
   }
 
+  async function copyCurrentSupplierForOperations() {
+    if (supplier === null) {
+      return
+    }
+
+    setExportingOperations(true)
+    setError(null)
+    setOperationsExportMessage(null)
+    setOperationsExportJson(null)
+
+    try {
+      const payload = await getSupplierOperationsExport(supplier.id)
+      const formattedJson = JSON.stringify(payload, null, 2)
+
+      if (navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(formattedJson)
+          setOperationsExportMessage({ tone: 'ok', text: 'Operations JSON copied.' })
+          return
+        } catch (exception) {
+          setOperationsExportMessage({
+            tone: 'error',
+            text: `Clipboard copy failed: ${readError(exception)}. Copy the JSON below.`,
+          })
+        }
+      } else {
+        setOperationsExportMessage({ tone: 'warn', text: 'Clipboard is unavailable. Copy the JSON below.' })
+      }
+
+      setOperationsExportJson(formattedJson)
+    } catch (exception) {
+      setError(readError(exception))
+    } finally {
+      setExportingOperations(false)
+    }
+  }
+
   async function refreshAnalysisRun(supplierId: number, jobId: number) {
     setError(null)
 
@@ -1250,6 +1295,14 @@ function App() {
                 </button>
                 <button
                   className="ghost"
+                  disabled={exportingOperations}
+                  onClick={() => void copyCurrentSupplierForOperations()}
+                  type="button"
+                >
+                  {exportingOperations ? 'Copying...' : 'Copy for Operations'}
+                </button>
+                <button
+                  className="ghost"
                   disabled={archivingSupplier}
                   onClick={archiveSelectedSupplier}
                   type="button"
@@ -1258,6 +1311,23 @@ function App() {
                 </button>
               </div>
             </div>
+
+            {(operationsExportMessage || operationsExportJson) && (
+              <section className="operations-export-panel">
+                {operationsExportMessage && (
+                  <p className={`operations-export-message ${operationsExportMessage.tone}`}>
+                    {operationsExportMessage.text}
+                  </p>
+                )}
+                {operationsExportJson && (
+                  <textarea
+                    aria-label="Operations export JSON"
+                    readOnly
+                    value={operationsExportJson}
+                  />
+                )}
+              </section>
+            )}
 
             <nav className="review-stepper" aria-label="Supplier review steps">
               <ReviewStepButton

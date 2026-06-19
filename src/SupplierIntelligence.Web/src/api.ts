@@ -123,6 +123,20 @@ export type SupplierReviewSummary = {
   trustSignals: SupplierTrustSignals
 }
 
+export type SupplierOperationsExport = {
+  sourceSystem: string
+  externalSupplierKey: string
+  name: string
+  country: string
+  industry: string
+  websiteUrl: string | null
+  researchUrl: string | null
+  summary: string
+  knownInformation: string[]
+  sourceCount: number
+  exportedAt: string
+}
+
 export type SupplierReviewNextAction = {
   type: string
   title: string
@@ -375,6 +389,10 @@ export function getSupplier(id: number) {
 
 export function getSupplierReviewSummary(id: number) {
   return request<SupplierReviewSummary>(`/api/suppliers/${id}/review-summary`)
+}
+
+export function getSupplierOperationsExport(id: number) {
+  return request<SupplierOperationsExport>(`/api/suppliers/${id}/operations-export`)
 }
 
 export function getSupplierAnalytics(id: number) {
